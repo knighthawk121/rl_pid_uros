@@ -7,7 +7,7 @@ import numpy as np
 import socket
 
 # Define the UDP connection to the ESP32
-UDP_IP = "192.168.31.249"  # Replace with your ESP32's IP address
+UDP_IP = "xxx.xxx.xxx.xxx"  # Replace with your ESP32's IP address
 UDP_PORT = 8888
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
