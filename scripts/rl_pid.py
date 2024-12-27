@@ -1,10 +1,12 @@
+#!/usr/bin/env python3
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Float32
 from rl_pid_uros.srv import Tminusp
 import numpy as np
 import socket
-from rl_agent import QLearningAgent  # Import the agent
+from rl_pid_uros_py.rl_agent import QLearningAgent  # Import the agent
 
 # Define the UDP connection to the ESP32
 UDP_IP = "192.168.31.249"  # Replace with your ESP32's IP address
@@ -21,7 +23,7 @@ class MotorFeedbackSubscriber(Node):
         super().__init__('rl_pid_sub')
         self.subscription = self.create_subscription(
             Float32,
-            'uros_msg_pid',
+            'esp32_motor_controller',
             self.listener_callback,
             10)
         self.subscription  # prevent unused variable warning
