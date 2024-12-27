@@ -22,7 +22,7 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'rl_pid = rl_py_pid_uros.rl_pid:main'
+            'pid_tuner = rl_py_pid_uros.rl_pid:main'
         ],
     },
 )
