@@ -16,8 +16,8 @@
 #define STBY 27
 
 // WiFi Credentials
-const char *ssid = "Home";
-const char *password = "OpenDoor_55";
+const char *ssid = "your_ssid";
+const char *password = "password";
 
 // micro-ROS objects
 rcl_node_t node;

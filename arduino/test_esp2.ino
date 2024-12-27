@@ -7,8 +7,8 @@
 #define IN1 13   // Motor direction pin 1
 #define IN2 12   // Motor direction pin 2
 
-const char* ssid = "Home5G";
-const char* password = "OpenDoor_55";
+const char* ssid = "your_ssid";
+const char* password = "password";
 
 volatile int posi = 0;  // Encoder position variable
 
