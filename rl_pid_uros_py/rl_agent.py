@@ -1,9 +1,9 @@
-import numpy as np
+
 #import torch
 #import torch.nn as nn
 #import torch.optim as optim
+import numpy as np
 
-# Q-learning agent
 class QLearningAgent:
     def __init__(self, alpha=0.1, gamma=0.9, epsilon=0.1):
         self.alpha = alpha
@@ -21,6 +21,32 @@ class QLearningAgent:
         best_future_q = np.max(self.q_table[kp_idx, ki_idx, kd_idx])
         current_q = self.q_table[kp_idx, ki_idx, kd_idx]
         self.q_table[kp_idx, ki_idx, kd_idx] += self.alpha * (reward + self.gamma * best_future_q - current_q)
+
+    def get_pid_values(self, state):
+        # Get indices based on current state or use predefined values
+        kp_idx = state % 10  # Placeholder logic to get an index for kp
+        ki_idx = (state + 1) % 10  # Example: incremented for ki
+        kd_idx = (state + 2) % 10  # Example: incremented for kd
+
+        # Retrieve action from Q-table
+        action = self.get_action(kp_idx, ki_idx, kd_idx)
+
+        # Define how each action maps to PID values (for example, -1 = decrease, 0 = stay, 1 = increase)
+        kp = kp_idx * 0.1  # Translate index to PID value (e.g., 0 -> 0.0, 9 -> 0.9)
+        ki = ki_idx * 0.01
+        kd = kd_idx * 0.001
+
+        # Modify PID values based on the action
+        if action == 0:  # Decrease
+            kp -= 0.1
+            ki -= 0.001
+            kd -= 0.0001
+        elif action == 2:  # Increase
+            kp += 0.1
+            ki += 0.001
+            kd += 0.0001
+
+        return kp, ki, kd
 
 # SARSA agent
 class SARSAAgent:
