@@ -163,7 +163,7 @@ void readEncoder() {
 }
 
 void initializeMicroRos() {
-  set_microros_wifi_transports((char *)ssid, (char *)password, (char *)"192.168.31.127", 8888);
+  set_microros_wifi_transports((char *)ssid, (char *)password, (char *)"your_pc_ip", 8888);
   delay(2000);
 
   allocator = rcl_get_default_allocator();
