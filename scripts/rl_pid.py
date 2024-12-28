@@ -5,22 +5,20 @@ from rclpy.node import Node
 from rl_pid_uros.srv import Tminusp
 import numpy as np
 import time  # To handle the 5-second interval
-from rl_pid_uros_py.rl_agent import QLearningAgent
-
-
+from rl_pid_uros_py.q_learner import QLearningAgent
 
 class MotorPIDTuner(Node):
     def __init__(self):
         super().__init__('rl_pid_tuner')
-        
+
         # Create a service client for /tune_pid
         self.client = self.create_client(Tminusp, '/tune_pid')
-        
+
         # Log that we're waiting for the service
         self.get_logger().info('Waiting for /tune_pid service to be available...')
         while not self.client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Service not available, waiting again...')
-        
+
         # Initialize Q-learning agent
         self.agent = QLearningAgent()
         self.get_logger().info('Q-learning agent initialized.')
@@ -39,7 +37,7 @@ class MotorPIDTuner(Node):
         # Get PID values from the Q-learning agent based on the current state
         state = self.get_current_state()  # Placeholder for actual state calculation
         self.get_logger().info(f'Getting PID values for state: {state}')
-        
+
         # Retrieve PID values from the agent
         kp, ki, kd = self.agent.get_pid_values(state)
         self.get_logger().info(f'PID values from agent: kp={kp}, ki={ki}, kd={kd}')
@@ -59,11 +57,11 @@ class MotorPIDTuner(Node):
         # Process the response
         if future.result() is not None:
             response = future.result()
-            tvp = response.tvp  # Target vs position value from ESP32 response
-            self.get_logger().info(f'Received target vs position value: {tvp}')
-            
-            # Calculate the reward based on the state (e.g., negative reward for large error)
-            reward = -abs(tvp)
+            error = response.tvp  # Target vs position value (error) from ESP32 response
+            self.get_logger().info(f'Received error value: {error}')
+
+            # Calculate the reward based on the error (e.g., negative reward for large error)
+            reward = -abs(error)
             self.get_logger().info(f'Calculated reward: {reward}')
 
             # Update Q-table with feedback
@@ -79,10 +77,12 @@ class MotorPIDTuner(Node):
             self.get_logger().error('Service call failed. No response received.')
 
     def get_current_state(self):
-        # Implement a way to get the current state based on the motor position or error
-        # For example, calculate the motor error here
-        self.get_logger().info('Fetching current state (placeholder value).')
-        return 0  # Placeholder: Replace with actual state calculation (e.g., motor position)
+        # Fetch current state based on motor position or error
+        # Placeholder logic for demonstration purposes
+        error = np.random.uniform(-10, 10)  # Replace with actual sensor data if available
+        self.get_logger().info(f'Current state (error): {error}')
+        return int(error)
+
 
 def main(args=None):
     try:
@@ -94,6 +94,7 @@ def main(args=None):
     except Exception as e:
         print(f"Error: {e}")
         raise
+
 
 if __name__ == '__main__':
     try:
