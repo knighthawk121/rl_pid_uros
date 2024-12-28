@@ -1,5 +1,7 @@
 import numpy as np
 
+
+
 class QLearningAgent:
     def __init__(self, alpha=0.1, gamma=0.9, epsilon=0.1):
         self.alpha = alpha
