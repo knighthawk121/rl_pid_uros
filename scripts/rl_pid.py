@@ -20,7 +20,8 @@ class MotorPIDTuner(Node):
         self.get_logger().info('Waiting for /tune_pid service to be available...')
         while not self.client.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Service not available, waiting again...')
-
+        # Add heartbeat timer
+        self.heartbeat_timer = self.create_timer(1.0, self.check_connection)
         # Initialize Q-learning agent
         self.agent = QLearningAgent()
         self.get_logger().info('Q-learning agent initialized.')
@@ -34,49 +35,53 @@ class MotorPIDTuner(Node):
         # Start the timer to send PID values every 5 seconds
         self.timer = self.create_timer(5.0, self.send_pid_values)  # 5 seconds interval
         self.get_logger().info('Timer started to send PID values every 5 seconds.')
+    
+    
+    def check_connection(self):
 
+        if not self.client.service_is_ready():
+            self.get_logger().warn('Service not available')
+    
+    
     def send_pid_values(self):
-        # Get PID values from the Q-learning agent based on the current state
-        state = self.get_current_state()  # Placeholder for actual state calculation
-        self.get_logger().info(f'Getting PID values for state: {state}')
+            try:
+                
+                state = self.get_current_state()
+                self.get_logger().info(f'Getting PID values for state: {state}')
 
-        # Retrieve PID values from the agent
-        kp, ki, kd = self.agent.get_pid_values(state)
-        self.get_logger().info(f'PID values from agent: kp={kp}, ki={ki}, kd={kd}')
+                # Retrieve PID values from the agent
+                kp, ki, kd = self.agent.get_pid_values(state)
+                self.get_logger().info(f'PID values from agent: kp={kp}, ki={ki}, kd={kd}')
 
-        # Create the service request with the PID values
-        request = Tminusp.Request()
-        request.kp = kp
-        request.ki = ki
-        request.kd = kd
-        self.get_logger().info(f'Created service request with values: kp={kp}, ki={ki}, kd={kd}')
+                # Create the service request with the PID values
+                request = Tminusp.Request()
+                request.kp = float(kp)
+                request.ki = float(ki)
+                request.kd = float(kd)
+                self.get_logger().info(f'Created service request with values: kp={kp}, ki={ki}, kd={kd}')
+                future = self.client.call_async(request)
 
-        # Send the request asynchronously and wait for the response
-        future = self.client.call_async(request)
-        self.get_logger().info('Sending service request asynchronously...')
-        rclpy.spin_until_future_complete(self, future)
-
-        # Process the response
-        if future.result() is not None:
-            response = future.result()
-            error = response.tvp  # Target vs position value (error) from ESP32 response
-            self.get_logger().info(f'Received error value: {error}')
-
-            # Calculate the reward based on the error (e.g., negative reward for large error)
-            reward = -abs(error)
-            self.get_logger().info(f'Calculated reward: {reward}')
-
-            # Update Q-table with feedback
-            kp_idx = int(np.clip(kp * 10, 0, 9))
-            ki_idx = int(np.clip(ki * 100, 0, 9))
-            kd_idx = int(np.clip(kd * 1000, 0, 9))
-            self.get_logger().info(f'Updating Q-table with indices: kp_idx={kp_idx}, ki_idx={ki_idx}, kd_idx={kd_idx}')
-            self.agent.update_q_table(kp_idx, ki_idx, kd_idx, reward)
-
-            # Log the update
-            self.get_logger().info(f'Q-table updated with reward: {reward}')
-        else:
-            self.get_logger().error('Service call failed. No response received.')
+                if not rclpy.spin_until_future_complete(self, future, timeout_sec=5.0):
+                        self.get_logger().warn('Service call timed out')
+                        return
+                # Add validity checks for response
+                if not isinstance(future.result(), Tminusp.Response):
+                    self.get_logger().error('Received invalid response type')
+                    return
+                    
+                response = future.result()
+                error = response.tvp
+                
+                # Add bounds checking for reward calculation
+                if abs(error) > 1000:  # Arbitrary threshold
+                    self.get_logger().warn(f'Unusually large error value: {error}')
+                    return
+                    
+                # Use a more sophisticated reward function
+                reward = -abs(error) / (1 + abs(error))  # Bounded negative reward
+                
+            except Exception as e:
+                self.get_logger().error(f'Error in send_pid_values: {str(e)}')
 
     def get_current_state(self):
         # Fetch current state based on motor position or error

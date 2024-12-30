@@ -7,7 +7,7 @@
 #include <rclc/executor.h>
 #include <rl_pid_uros/srv/tminusp.h>
 
-// Motor and Encoder Pins
+// Constants and Pin Definitions
 #define ENCA 18
 #define ENCB 19
 #define PWM 14
@@ -15,9 +15,54 @@
 #define IN2 12
 #define STBY 27
 
+#define WIFI_TIMEOUT_MS 10000      // 10 second WiFi connection timeout
+#define WIFI_RECOVER_TIME_MS 5000  // Wait 5 seconds before retrying WiFi
+#define STACK_SIZE 4096            // Increased stack size
+#define MAX_INTEGRAL 1000.0        // Anti-windup limit
+#define DEADBAND 10
+#define PWM_FREQUENCY 1000
+#define PWM_RESOLUTION 8
+
 // WiFi Credentials
 const char *ssid = "Home";
 const char *password = "OpenDoor_55";
+const char *agent_ip = "192.168.31.127";
+const int agent_port = 8888;
+
+// Synchronization primitives
+static portMUX_TYPE positionMux = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t pidMutex = NULL;
+
+// Motor Control Structure
+struct MotorControl {
+  volatile int position;
+  int target;
+  float kp;
+  float ki;
+  float kd;
+  float eprev;
+  float eintegral;
+  long prevT;
+  bool updateInProgress;
+};
+
+// Global variables
+MotorControl motor = {
+  .position = 0,
+  .target = 0,
+  .kp = 1.0,
+  .ki = 0.0,
+  .kd = 0.01,
+  .eprev = 0,
+  .eintegral = 0,
+  .prevT = 0,
+  .updateInProgress = false
+};
+
+// Target positions array
+const int targetArray[] = { 100, 200, 300, 400, 500 };
+const int targetArraySize = sizeof(targetArray) / sizeof(targetArray[0]);
+volatile int targetIndex = 0;
 
 // micro-ROS objects
 rcl_node_t node;
@@ -26,159 +71,271 @@ rclc_support_t support;
 rclc_executor_t executor;
 rcl_allocator_t allocator;
 
-// PID and Motor Control Variables
-volatile int posi = 0;
-long prevT = 0;
-float eprev = 0;
-float eintegral = 0;
-float kp = 1.0;
-float kd = 0.01;
-float ki = 0.0;
-int target = 0;
-volatile bool pidUpdateInProgress = false;
-
-void initializeMicroRos();
+// Function declarations
+void initializePins();
+bool initializeWiFi();
+bool initializeMicroRos();
 void spinMicroRos();
 void motorControlTask(void *parameter);
 void handle_service(const void *req, void *res);
-void readEncoder();
-float calculate_tvp(float kp, float ki, float kd);
 void setMotor(int dir, int pwmVal, int pwm, int in1, int in2);
+int getPosition();
+void updatePID();
+void IRAM_ATTR readEncoder();
 
+// Safe position reading
+int getPosition() {
+  int pos;
+  portENTER_CRITICAL(&positionMux);
+  pos = motor.position;
+  portEXIT_CRITICAL(&positionMux);
+  return pos;
+}
+
+// Interrupt handler for encoder
+void IRAM_ATTR readEncoder() {
+  int b = digitalRead(ENCB);
+  portENTER_CRITICAL_ISR(&positionMux);
+  if (b > 0) {
+    motor.position++;
+  } else {
+    motor.position--;
+  }
+  portEXIT_CRITICAL_ISR(&positionMux);
+}
+
+// Service callback
 void handle_service(const void *req, void *res) {
-    if (pidUpdateInProgress) return;
-
+  Serial.println("Service request received at time: " + String(millis()));
+  Serial.println("Received service request");
+  if (xSemaphoreTake(pidMutex, portMAX_DELAY) == pdTRUE) {
     auto *request = (rl_pid_uros__srv__Tminusp_Request *)req;
     auto *response = (rl_pid_uros__srv__Tminusp_Response *)res;
 
-    kp = request->kp;
-    ki = request->ki;
-    kd = request->kd;
-
-    noInterrupts();
-    int pos = posi;
-    interrupts();
-
-    response->tvp = target - pos;  // Error
-
-    Serial.print("Received PID: kp=");
-    Serial.print(kp);
-    Serial.print(", ki=");
-    Serial.print(ki);
-    Serial.print(", kd=");
-    Serial.println(kd);
-    Serial.print("Sending TVP (error): ");
-    Serial.println(response->tvp);
-
-    pidUpdateInProgress = true;
-    delay(500);  // Simulate processing time
-    pidUpdateInProgress = false;
-}
-
-void setup() {
-    Serial.begin(115200);
-
-    pinMode(ENCA, INPUT_PULLUP);
-    pinMode(ENCB, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(ENCA), readEncoder, RISING);
-    pinMode(IN1, OUTPUT);
-    pinMode(IN2, OUTPUT);
-    pinMode(STBY, OUTPUT);
-    ledcAttach(PWM, 1000, 8);
-    ledcWrite(PWM, 0);
-
-    WiFi.begin(ssid, password);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
+    if (request->kp >= 0 && request->ki >= 0 && request->kd >= 0) {
+      motor.kp = request->kp;
+      motor.ki = request->ki;
+      motor.kd = request->kd;
     }
-    Serial.println();
-    Serial.print("Connected, IP: ");
-    Serial.println(WiFi.localIP());
+    response->tvp = getPosition();
 
-    initializeMicroRos();
-    xTaskCreatePinnedToCore(motorControlTask, "MotorControl", 2048, NULL, 1, NULL, 0);
-}
+    Serial.printf("PID Update - kp: %.2f, ki: %.2f, kd: %.2f\n",
+                  motor.kp, motor.ki, motor.kd);
+    Serial.printf("Current Position: %d\n", response->tvp);
 
-void loop() {
-    spinMicroRos();
+    xSemaphoreGive(pidMutex);
+  }
+  Serial.println("Service request completed at time: " + String(millis()));
 }
 
 void motorControlTask(void *parameter) {
-    static int prev_posi = 0;
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    const TickType_t xFrequency = pdMS_TO_TICKS(100);
+    int stuckCounter = 0;
+    int lastPosition = 0;
+
     while (true) {
-        target = 250 * sin(millis() / 1000.0);
-
-        if (!pidUpdateInProgress) {
-            long currT = micros();
-            float deltaT = ((float)(currT - prevT)) / 1.0e6;
-            prevT = currT;
-
-            noInterrupts();
-            int pos = posi;
-            interrupts();
-
-            int e = target - pos;
-            float dedt = (e - eprev) / deltaT;
-            eintegral = constrain(eintegral + e * deltaT, -1000, 1000);
-
-            float u = kp * e + kd * dedt + ki * eintegral;
-            float pwr = constrain(fabs(u), 0, 255);
-
-            int dir = (u < 0) ? -1 : 1;
-            setMotor(dir, pwr, PWM, IN1, IN2);
-
-            eprev = e;
-
-            Serial.print("Pos: ");
-            Serial.print(pos);
-            Serial.print(" Target: ");
-            Serial.println(target);
+      int currentPosition = getPosition();
+      /*if (abs(currentPosition - lastPosition) < 2) {
+        stuckCounter++;
+        if (stuckCounter > 50) {  // Motor stuck for 5 seconds
+          Serial.println("Motor potentially stuck - resetting integral term");
+          motor.eintegral = 0;
+          stuckCounter = 0;
         }
-        delay(100);
-    }
-}
+      } else {
+        stuckCounter = 0;
+      }*/
+      lastPosition = currentPosition;
 
-void setMotor(int dir, int pwmVal, int pwm, int in1, int in2) {
+      if (xSemaphoreTake(pidMutex, portMAX_DELAY) == pdTRUE) {
+        long currT = micros();
+        float deltaT = ((float)(currT - motor.prevT)) / 1.0e6;
+        motor.prevT = currT;
+
+        int pos = getPosition();
+        int e = pos - motor.target;
+
+        // PID calculations
+        float dedt = (e - motor.eprev) / deltaT;
+        motor.eintegral = motor.eintegral + e * deltaT;
+        motor.eintegral = constrain(motor.eintegral, -MAX_INTEGRAL, MAX_INTEGRAL);
+
+        float u = motor.kp * e + motor.kd * dedt + motor.ki * motor.eintegral;
+        float pwr = fabs(u);
+        pwr = constrain(pwr, 0, 255);
+
+        int dir = (u < 0) ? -1 : 1;
+        setMotor(dir, pwr, PWM, IN1, IN2);
+
+        motor.eprev = e;
+
+        Serial.printf("Position: %d, Target: %d, Error: %d\n",
+                      pos, motor.target, e);
+
+        if (abs(e) < DEADBAND) {
+          vTaskDelay(pdMS_TO_TICKS(1000));
+          targetIndex = (targetIndex + 1) % targetArraySize;
+          motor.target = targetArray[targetIndex];
+          motor.eintegral = 0;
+        }
+
+        xSemaphoreGive(pidMutex);
+      }
+      vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
+  }
+
+  void setMotor(int dir, int pwmVal, int pwm, int in1, int in2) {
     digitalWrite(STBY, HIGH);
     ledcWrite(pwm, pwmVal);
-    if (dir == 1) {
-        digitalWrite(in1, HIGH);
-        digitalWrite(in2, LOW);
-    } else {
-        digitalWrite(in1, LOW);
-        digitalWrite(in2, HIGH);
-    }
-}
+    digitalWrite(in1, dir == 1 ? HIGH : LOW);
+    digitalWrite(in2, dir == 1 ? LOW : HIGH);
+  }
 
-void readEncoder() {
-    static uint32_t last_interrupt_time = 0;
-    uint32_t interrupt_time = millis();
-    if (interrupt_time - last_interrupt_time > 5) {
-        int b = digitalRead(ENCB);
-        posi += (b > 0) ? 1 : -1;
-        last_interrupt_time = interrupt_time;
-    }
-}
+  void initializePins() {
+    pinMode(ENCA, INPUT_PULLUP);
+    pinMode(ENCB, INPUT_PULLUP);
+    pinMode(IN1, OUTPUT);
+    pinMode(IN2, OUTPUT);
+    pinMode(STBY, OUTPUT);
 
-void initializeMicroRos() {
-    set_microros_wifi_transports((char *)ssid, (char *)password, (char *)"192.168.31.127", 8888);
+    ledcAttach(PWM, PWM_FREQUENCY, PWM_RESOLUTION);
+    ledcWrite(PWM, 0);
+
+    attachInterrupt(digitalPinToInterrupt(ENCA), readEncoder, RISING);
+  }
+
+  bool initializeWiFi() {
+    unsigned long startAttemptTime = millis();
+
+    WiFi.begin(ssid, password);
+    while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < WIFI_TIMEOUT_MS) {
+      delay(100);
+      Serial.print(".");
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi connection FAILED");
+      return false;
+    }
+
+    Serial.println("WiFi connected");
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());
+    return true;
+  }
+
+  bool initializeMicroRos() {
+    // First, set up the WiFi transport
+    set_microros_wifi_transports((char *)ssid, (char *)password,
+                                 (char *)agent_ip, agent_port);
+
+    // Give some time for the transport to initialize
     delay(2000);
 
-    allocator = rcl_get_default_allocator();
-    rclc_support_init(&support, 0, NULL, &allocator);
-    rclc_node_init_default(&node, "esp32_motor_controller", "", &support);
+    // Get the default allocator - this needs to be a local variable
+    rcl_allocator_t local_allocator = rcl_get_default_allocator();
+    allocator = local_allocator;  // Copy to our global variable
 
-    const rosidl_service_type_support_t *service_type_support = ROSIDL_GET_SRV_TYPE_SUPPORT(rl_pid_uros, srv, Tminusp);
-    rclc_service_init_default(&service, &node, service_type_support, "/tune_pid");
+    // Initialize the support structure with proper error checking
+    rcl_ret_t ret = rclc_support_init(&support, 0, NULL, &allocator);
+    if (ret != RCL_RET_OK) {
+      Serial.println("Failed to initialize support");
+      return false;
+    }
 
+    // Initialize the node
+    ret = rclc_node_init_default(&node, "esp32_motor_controller", "", &support);
+    if (ret != RCL_RET_OK) {
+      Serial.println("Failed to initialize node");
+      return false;
+    }
+
+    // Get the service type support
+    const rosidl_service_type_support_t *service_type_support =
+      ROSIDL_GET_SRV_TYPE_SUPPORT(rl_pid_uros, srv, Tminusp);
+
+    // Initialize the service
+    ret = rclc_service_init_default(&service, &node, service_type_support, "/tune_pid");
+    if (ret != RCL_RET_OK) {
+      Serial.println("Failed to initialize service");
+      return false;
+    }
+
+    // Initialize the executor
     executor = rclc_executor_get_zero_initialized_executor();
-    rclc_executor_init(&executor, &support.context, 1, &allocator);
-    rclc_executor_add_service(&executor, &service, NULL, NULL, handle_service);
+    ret = rclc_executor_init(&executor, &support.context, 1, &allocator);
+    if (ret != RCL_RET_OK) {
+      Serial.println("Failed to initialize executor");
+      return false;
+    }
 
-    Serial.println("micro-ROS Ready");
-}
+    // Create temporary request and response objects for the service
+    rl_pid_uros__srv__Tminusp_Request req;
+    rl_pid_uros__srv__Tminusp_Response res;
 
-void spinMicroRos() {
+    // Add the service to the executor
+    ret = rclc_executor_add_service(&executor, &service, &req, &res, handle_service);
+    if (ret != RCL_RET_OK) {
+      Serial.println("Failed to add service to executor");
+      return false;
+    }
+
+    Serial.println("micro-ROS initialized successfully");
+    return true;
+  }
+
+  void setup() {
+    Serial.begin(115200);
+
+    // Initialize mutex
+    pidMutex = xSemaphoreCreateMutex();
+    if (pidMutex == NULL) {
+      Serial.println("Failed to create mutex");
+      return;
+    }
+
+    initializePins();
+
+    if (!initializeWiFi()) {
+      return;
+    }
+
+    if (!initializeMicroRos()) {
+      return;
+    }
+
+    // Initialize first target
+    motor.target = targetArray[targetIndex];
+
+    // Create motor control task
+    BaseType_t xReturned = xTaskCreatePinnedToCore(
+      motorControlTask,
+      "MotorControl",
+      STACK_SIZE,
+      NULL,
+      2,
+      NULL,
+      0);
+
+    if (xReturned != pdPASS) {
+      Serial.println("Failed to create motor control task");
+      return;
+    }
+  }
+
+  void loop() {
+    spinMicroRos();
+
+    // Monitor WiFi connection
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("WiFi connection lost!");
+      vTaskDelay(pdMS_TO_TICKS(WIFI_RECOVER_TIME_MS));
+      ESP.restart();  // Reset the ESP32 to recover WiFi
+    }
+  }
+
+  void spinMicroRos() {
     rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
-}
+  }

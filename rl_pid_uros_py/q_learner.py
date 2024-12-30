@@ -21,11 +21,13 @@ class QLearningAgent:
         self.q_table[kp_idx, ki_idx, kd_idx] += self.alpha * (reward + self.gamma * best_future_q - current_q)
 
     def get_pid_values(self, state):
-        # Map the state to PID indices
-        kp_idx = int(np.clip(state % 10, 0, 9))  # Example: Use state modulo for kp index
-        ki_idx = int(np.clip((state + 1) % 10, 0, 9))  # Increment for ki index
-        kd_idx = int(np.clip((state + 2) % 10, 0, 9))  # Increment for kd index
-
+        error_magnitude = abs(state)
+        error_sign = np.sign(state)
+    
+    # Use error magnitude to determine appropriate parameter ranges
+        kp_idx = int(np.clip(error_magnitude * 2, 0, 9))
+        ki_idx = int(np.clip(error_magnitude, 0, 9))
+        kd_idx = int(np.clip(error_magnitude * 0.5, 0, 9))
         # Retrieve action from Q-table
         action = self.get_action(kp_idx, ki_idx, kd_idx)
 
