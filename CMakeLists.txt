@@ -36,6 +36,13 @@ install(PROGRAMS
   RENAME pid_tuner
 )
 
+install(PROGRAMS
+  launch/launch.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME launch
+)
+
+
 # Install additional package files
 install(DIRECTORY
   srv
