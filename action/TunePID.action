@@ -7,6 +7,8 @@
 float32 kp    # Proportional gain coefficient
 float32 ki    # Integral gain coefficient
 float32 kd    # Derivative gain coefficient
+int32 target_position #specified target position the motor has to reach 0 - 360
+
 ---
 # Result Definition
 # This is sent once when the tuning process completes
