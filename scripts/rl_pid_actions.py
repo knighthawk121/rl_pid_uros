@@ -36,14 +36,6 @@ class MotorPIDTuner(Node):
         # Initialize Q-learning agent
         self.agent = QLearningAgent()
         self.get_logger().info('Q-learning agent initialized')
-
-        # Set initial PID values
-        self.kp = 1.0
-        self.ki = 0.001
-        self.kd = 0.0
-        
-        # Current target position
-        self.current_target = 0
         
         # Wait for action server
         self.get_logger().info('Waiting for action server...')
@@ -51,7 +43,7 @@ class MotorPIDTuner(Node):
         self.get_logger().info('Action server is available!')
 
         # Create timer for sending new goals
-        self.timer = self.create_timer(5.0, self.send_new_goal)
+        self.timer = self.create_timer(5.0, self.send_new_goal_wrapper)
         self.get_logger().info('Timer started for sending goals every 5 seconds')
 
     def generate_random_target(self):
@@ -69,36 +61,18 @@ class MotorPIDTuner(Node):
             'timestamp': self.get_clock().now().to_msg()
         })
         
-        # Log feedback data
         self.get_logger().debug(
             f'Feedback received - Error: {feedback.current_error:.2f}, '
             f'Position: {feedback.current_position}, '
             f'Target: {feedback.target_position}'
         )
 
-    def calculate_episode_reward(self):
-        """Calculate reward based on feedback history"""
-        if not self.feedback_history:
-            return 0.0
-            
-        # Calculate various performance metrics
-        errors = [fb['error'] for fb in self.feedback_history]
-        avg_error = np.mean(np.abs(errors))
-        max_error = np.max(np.abs(errors))
-        settling_time = len(self.feedback_history) * 0.1  # Feedback every 100ms
-        
-        # Combine metrics into a reward
-        reward = -(
-            0.5 * avg_error +  # Penalize average error
-            0.3 * max_error +  # Penalize maximum error
-            0.2 * settling_time  # Penalize longer settling times
-        )
-        
-        return reward
+    def send_new_goal_wrapper(self):
+        """Non-async wrapper for the timer callback"""
+        rclpy.create_task(self.send_new_goal())
 
     async def send_new_goal(self):
         """Send a new goal to the action server"""
-        # Don't send new goal if one is already active
         if self.goal_active:
             self.get_logger().debug('Previous goal still active, skipping...')
             return
@@ -110,9 +84,8 @@ class MotorPIDTuner(Node):
             
             # Generate new random target position
             target_position = self.generate_random_target()
-            self.current_target = target_position
             
-            # Create and send goal
+            # Create goal message
             goal_msg = TunePID.Goal()
             goal_msg.kp = float(kp)
             goal_msg.ki = float(ki)
@@ -127,28 +100,29 @@ class MotorPIDTuner(Node):
             # Clear feedback history for new episode
             self.feedback_history = []
             
-            # Send goal and get future
+            # Send goal and wait for acceptance
             send_goal_future = await self.action_client.send_goal_async(
                 goal_msg,
                 feedback_callback=self.feedback_callback
             )
             
-            # Handle goal response
-            self.current_goal_handle = await send_goal_future
-            if not self.current_goal_handle.accepted:
+            # Check if goal was accepted
+            if not send_goal_future.accepted:
                 self.get_logger().warn('Goal was rejected!')
                 return
-                
+
+            # Store the goal handle
+            self.current_goal_handle = send_goal_future
             self.goal_active = True
-            
+                
             # Wait for result
-            result_future = await self.current_goal_handle.get_result_async()
-            result = result_future.result
+            get_result_future = await send_goal_future.get_result_async()
+            result = get_result_future.result
             
             # Process result and update Q-learning agent
             final_error = result.final_error
             reward = self.calculate_episode_reward()
-            next_state = int(final_error)  # Simplistic state representation
+            next_state = int(final_error)
             
             # Update Q-learning agent with episode results
             self.agent.update(state, (kp, ki, kd), reward, next_state)
@@ -163,25 +137,40 @@ class MotorPIDTuner(Node):
         finally:
             self.goal_active = False
 
+    def calculate_episode_reward(self):
+        """Calculate reward based on feedback history"""
+        if not self.feedback_history:
+            return 0.0
+            
+        errors = [fb['error'] for fb in self.feedback_history]
+        avg_error = np.mean(np.abs(errors))
+        max_error = np.max(np.abs(errors))
+        settling_time = len(self.feedback_history) * 0.1
+        
+        reward = -(
+            0.5 * avg_error +
+            0.3 * max_error +
+            0.2 * settling_time
+        )
+        
+        return reward
+
     def get_current_state(self):
         """Get current state for Q-learning"""
         if self.latest_feedback is not None:
-            # Use the latest error as state
             return int(self.latest_feedback.current_error)
-        return 0  # Default state when no feedback available
+        return 0
 
-async def main(args=None):
+def main(args=None):
     rclpy.init(args=args)
     
     try:
         node = MotorPIDTuner()
-        
-        # Use multiple threads for concurrent execution
         executor = rclpy.executors.MultiThreadedExecutor()
         executor.add_node(node)
         
         try:
-            await executor.spin()
+            executor.spin()
         finally:
             executor.shutdown()
             node.destroy_node()
@@ -190,8 +179,4 @@ async def main(args=None):
         rclpy.shutdown()
 
 if __name__ == '__main__':
-    import asyncio
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Terminating the client.")
+    main()
