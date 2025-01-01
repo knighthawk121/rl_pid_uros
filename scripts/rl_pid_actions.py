@@ -5,9 +5,10 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.task import Future
-from rl_pid_uros.action import TunePID  # New action interface
+from rl_pid_uros.action import TunePID
 import numpy as np
 from rl_pid_uros_py.q_learner import QLearningAgent
+import random
 
 class MotorPIDTuner(Node):
     def __init__(self):
@@ -20,7 +21,7 @@ class MotorPIDTuner(Node):
         self.action_client = ActionClient(
             self,
             TunePID,
-            'tune_pid',
+            'tune_pid_action',
             callback_group=self.callback_group
         )
         
@@ -41,6 +42,9 @@ class MotorPIDTuner(Node):
         self.ki = 0.001
         self.kd = 0.0
         
+        # Current target position
+        self.current_target = 0
+        
         # Wait for action server
         self.get_logger().info('Waiting for action server...')
         self.action_client.wait_for_server()
@@ -49,6 +53,10 @@ class MotorPIDTuner(Node):
         # Create timer for sending new goals
         self.timer = self.create_timer(5.0, self.send_new_goal)
         self.get_logger().info('Timer started for sending goals every 5 seconds')
+
+    def generate_random_target(self):
+        """Generate a random target position between 0 and 360 degrees"""
+        return random.randint(0, 360)
 
     def feedback_callback(self, feedback_msg):
         """Handle feedback from the action server"""
@@ -100,14 +108,20 @@ class MotorPIDTuner(Node):
             state = self.get_current_state()
             kp, ki, kd = self.agent.get_pid_values(state)
             
+            # Generate new random target position
+            target_position = self.generate_random_target()
+            self.current_target = target_position
+            
             # Create and send goal
             goal_msg = TunePID.Goal()
             goal_msg.kp = float(kp)
             goal_msg.ki = float(ki)
             goal_msg.kd = float(kd)
+            goal_msg.target_position = target_position
             
             self.get_logger().info(
-                f'Sending new goal - kp: {kp:.4f}, ki: {ki:.4f}, kd: {kd:.4f}'
+                f'Sending new goal - kp: {kp:.4f}, ki: {ki:.4f}, kd: {kd:.4f}, '
+                f'target: {target_position} degrees'
             )
             
             # Clear feedback history for new episode
