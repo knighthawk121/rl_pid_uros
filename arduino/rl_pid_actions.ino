@@ -99,9 +99,9 @@ int getPosition();
 void IRAM_ATTR readEncoder();
 
 // Action messages
-static rl_pid_uros__action__TunePID_Goal goal_msg;
-static rl_pid_uros__action__TunePID_Feedback feedback_msg;
-static rl_pid_uros__action__TunePID_Result result_msg;
+//rl_pid_uros__action__TunePID_Goal *goal_msg = NULL;
+rl_pid_uros__action__TunePID_Feedback feedback_msg;
+rl_pid_uros__action__TunePID_Result result_msg;
 
 
 
@@ -309,6 +309,14 @@ bool initializeMicroRos() {
     return false;
   }
 
+  // Allocate memory for goal_msg
+  rl_pid_uros__action__TunePID_Goal *goal_msg =
+    (rl_pid_uros__action__TunePID_Goal *)malloc(sizeof(rl_pid_uros__action__TunePID_Goal));
+
+  if (goal_msg == NULL) {
+    Serial.println("Failed to allocate memory for goal_msg");
+    return false;
+  }
 
   // Initialize action server
   ret = rclc_action_server_init_default(
@@ -335,7 +343,7 @@ bool initializeMicroRos() {
     &executor,
     &action_server,
     1,  // handles number
-    &goal_msg,
+    goal_msg,
     sizeof(rl_pid_uros__action__TunePID_Goal),
     handle_goal,
     handle_cancel,
@@ -344,6 +352,7 @@ bool initializeMicroRos() {
 
   if (ret != RCL_RET_OK) {
     printf("Error adding action server to executor: %d\n", ret);
+    free(goal_msg);
     return false;
   }
   Serial.println("micro-ROS initialized successfully");
@@ -351,11 +360,23 @@ bool initializeMicroRos() {
 }
 
 static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, void *context) {
+
+  if (context == NULL) {
+    Serial.println("Error: Received NULL goal context");
+    return RCL_RET_ERROR;
+  }
+
+
   const rl_pid_uros__action__TunePID_Goal *goal =
     (const rl_pid_uros__action__TunePID_Goal *)context;
 
-  if (goal == NULL) {
-    return RCL_RET_ERROR;
+  Serial.printf("Received Goal - kp: %f, ki: %f, kd: %f, target_position: %d\n",
+                goal->kp, goal->ki, goal->kd, goal->target_position);
+
+  // Validate goal parameters
+  if (goal->kp < 0.0 || goal->ki < 0.0 || goal->kd < 0.0 || goal->target_position < 0) {
+    Serial.println("Goal parameters out of range, rejecting goal");
+    return RCL_RET_ACTION_GOAL_REJECTED;
   }
 
   xSemaphoreTake(pidMutex, portMAX_DELAY);
@@ -366,6 +387,7 @@ static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, void *conte
   motor.goalActive = true;
   xSemaphoreGive(pidMutex);
 
+  Serial.println("Goal accepted");
   return RCL_RET_ACTION_GOAL_ACCEPTED;
 }
 

@@ -5,6 +5,7 @@ from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.task import Future
+from rclpy.executors import Executor
 from rl_pid_uros.action import TunePID
 import numpy as np
 from rl_pid_uros_py.q_learner import QLearningAgent
@@ -67,9 +68,9 @@ class MotorPIDTuner(Node):
             f'Target: {feedback.target_position}'
         )
 
-    def send_new_goal_wrapper(self):
+    async def send_new_goal_wrapper(self):
         """Non-async wrapper for the timer callback"""
-        rclpy.create_task(self.send_new_goal())
+        await self.send_new_goal()
 
     async def send_new_goal(self):
         """Send a new goal to the action server"""
@@ -136,7 +137,8 @@ class MotorPIDTuner(Node):
             self.get_logger().error(f'Error in send_new_goal: {str(e)}')
         finally:
             self.goal_active = False
-
+        
+        rclpy.spin_once(self)   
     def calculate_episode_reward(self):
         """Calculate reward based on feedback history"""
         if not self.feedback_history:

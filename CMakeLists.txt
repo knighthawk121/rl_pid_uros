@@ -14,6 +14,7 @@ find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(action_msgs REQUIRED)
+
 # Generate interfaces for services and actions
 # Note: Files are relative to the package root directory
 rosidl_generate_interfaces(${PROJECT_NAME}
