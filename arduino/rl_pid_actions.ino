@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <micro_ros_arduino.h>
-
+#include <esp_task_wdt.h>
 // ROS 2 includes
 #include <rcl/rcl.h>
 #include <rcl/error_handling.h>
@@ -12,6 +12,7 @@
 #include <rmw_microros/rmw_microros.h>
 #include <action_msgs/msg/goal_status.h>
 #include <rcl_action/goal_handle.h>
+
 
 // Custom action interface includes
 #include <rl_pid_uros/action/tune_pid.h>
@@ -26,9 +27,7 @@
 
 #define WIFI_TIMEOUT_MS 10000
 #define WIFI_RECOVER_TIME_MS 5000
-#define STACK_SIZE 4096
-#define MAX_INTEGRAL 1000.0
-#define DEADBAND 10
+#define MOTOR_TASK_PRIORITY 2  // Increased priority
 #define PWM_FREQUENCY 1000
 #define PWM_RESOLUTION 8
 #define FEEDBACK_FREQUENCY_MS 100
@@ -36,11 +35,16 @@
 #define MAX_RECONNECT_ATTEMPTS 5
 #define MIN_PWM_VALUE 0
 #define MAX_PWM_VALUE 255
+#define STACK_SIZE (8192 * 2)  // Increased stack size
+#define MIN_DELTA_T 0.001      // 1ms minimum time delta
+#define EPSILON 1.0e-6
+#define DEADBAND 5          // Reduced deadband
+#define MAX_INTEGRAL 100.0  // Red
 
 // WiFi Credentials
-const char *ssid = "Home";
-const char *password = "OpenDoor_55";
-const char *agent_ip = "192.168.31.127";
+const char *ssid = "YOUR_SSID";
+const char *password = "YOUR_PASS";
+const char *agent_ip = "192.xxx.xx.xxx";
 const int agent_port = 8888;
 
 // Synchronization primitives
@@ -50,10 +54,10 @@ static SemaphoreHandle_t pidMutex = NULL;
 // Motor Control Structure
 struct MotorControl {
   volatile int position;
-  int target;
-  float kp;
-  float ki;
-  float kd;
+  long long target;
+  double kp;
+  double ki;
+  double kd;
   float eprev;
   float eintegral;
   long prevT;
@@ -75,11 +79,6 @@ MotorControl motor = {
   .goalActive = false
 };
 
-// Target positions array
-const int targetArray[] = { 100, 200, 300, 400, 500 };
-const int targetArraySize = sizeof(targetArray) / sizeof(targetArray[0]);
-volatile int targetIndex = 0;
-
 // Global declarations
 rcl_node_t node;
 rclc_support_t support;
@@ -98,11 +97,31 @@ void setMotor(int dir, int pwmVal, int pwm, int in1, int in2);
 int getPosition();
 void IRAM_ATTR readEncoder();
 
-// Action messages
-//rl_pid_uros__action__TunePID_Goal *goal_msg = NULL;
-rl_pid_uros__action__TunePID_Feedback feedback_msg;
-rl_pid_uros__action__TunePID_Result result_msg;
+// Callback function prototypes with correct signatures
+//rcl_ret_t accept_goal(const rcl_action_goal_handle_t *goal_handle);
+//rcl_ret_t handle_goal(const rcl_action_goal_handle_t *goal_handle, const void *goal);
+//bool handle_cancel(const rcl_action_goal_handle_t *goal_handle, void *context);
 
+// Action messages
+static bool goal_msg_initialized = false;
+// First, update global declarations
+static rl_pid_uros__action__TunePID_Goal goal_msg = {
+  .kp = 0.0d,
+  .ki = 0.0d,
+  .kd = 0.0d,
+  .target_position = 0
+};
+
+static rl_pid_uros__action__TunePID_Feedback feedback_msg = {
+  .current_error = 0,
+  .current_position = 0,
+  .target_position = 0
+
+};
+
+static rl_pid_uros__action__TunePID_Result result_msg = {
+  .final_error = 0
+};
 
 
 void setup() {
@@ -125,110 +144,123 @@ void setup() {
     return;
   }
 
-  // Start motor control task
+  // In setup(), update task creation:
   BaseType_t xReturned = xTaskCreatePinnedToCore(
     motorControlTask,
     "Motor Control",
     STACK_SIZE,
     NULL,
-    1,
+    MOTOR_TASK_PRIORITY,
     NULL,
-    1);
+    1);  // Run on core 1
 
+  // In your setup() function:
+  esp_task_wdt_config_t twdt_config = {
+    .timeout_ms = 10000,                                           // 10 seconds
+    .idle_core_mask = (1 << CONFIG_FREERTOS_NUMBER_OF_CORES) - 1,  // Bitmask of all cores
+    .trigger_panic = true
+  };
+
+  /* esp_task_wdt_init(&twdt_config);
   if (xReturned != pdPASS) {
     Serial.println("Failed to create motor control task");
     return;
-  }
+  }*/
 }
 
 // running motor control task independent of loop function.
-
 void motorControlTask(void *arg) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(10);  // Run at 100Hz
-  //static TickType_t lastFeedbackTime = 0;
+  const TickType_t xFrequency = pdMS_TO_TICKS(20);  // Reduced to 50Hz to lower system load
 
-  for (;;) {
+  while (1) {
     if (motor.goalActive) {
-      // Compute feedback
+      // Add delay at the start to prevent watchdog triggers
+      vTaskDelay(pdMS_TO_TICKS(1));
 
-      xSemaphoreTake(pidMutex, portMAX_DELAY);
+      if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        // Get current time and position
+        long currT = micros();
+        double deltaT = ((float)(currT - motor.prevT)) / 1.0e6;
+        if (deltaT <= 0) {
+          Serial.println("Error: Invalid time delta");
+          return;
+        }  // Ensure minimum deltaT
+        deltaT = max(deltaT, MIN_DELTA_T);
+        motor.prevT = currT;
 
-      long currT = micros();
-      float deltaT = ((float)(currT - motor.prevT)) / 1.0e6;
+        int currentPos = getPosition();
+        int e = motor.target - currentPos;
 
-      // Protect against too small deltaT
-      if (deltaT < MIN_DELTA_T) {
-        deltaT = MIN_DELTA_T;
-      }
+        // PID calculations with safety limits
+        float dedt = (e - motor.eprev) / (deltaT + EPSILON);
+        motor.eintegral += e * deltaT;
+        motor.eintegral = constrain(motor.eintegral, -MAX_INTEGRAL, MAX_INTEGRAL);
 
-      motor.prevT = currT;
+        // Calculate control signal
+        float pidOutput = (motor.kp * e) + (motor.ki * motor.eintegral) + (motor.kd * dedt);
 
-      // Get current position and calculate error
-      int currentPos = getPosition();
-      feedback_msg.current_position = currentPos;
-      feedback_msg.target_position = motor.target;
-      //error calculation
-      int e = motor.target - currentPos;
-      feedback_msg.current_error = e;
+        // Convert to motor commands
+        float pwr = constrain(fabs(pidOutput), 0, MAX_PWM_VALUE);
+        int dir = (pidOutput >= 0) ? 1 : -1;
 
-      // PID calculations
-      float dedt = (e - motor.eprev) / deltaT;
-      motor.eintegral = motor.eintegral + e * deltaT;
-      motor.eintegral = constrain(motor.eintegral, -MAX_INTEGRAL, MAX_INTEGRAL);
+        // Apply deadband
+        if (pwr < DEADBAND) {
+          pwr = 0;
+          dir = 0;
+        }
 
-      float u = motor.kp * e + motor.kd * dedt + motor.ki * motor.eintegral;
+        // Update motor
+        setMotor(dir, pwr, PWM, IN1, IN2);
+        motor.eprev = e;
 
-      // Convert control signal to PWM
-      float pwr = fabs(u);
-      pwr = constrain(pwr, MIN_PWM_VALUE, MAX_PWM_VALUE);
+        // Only send feedback occasionally to reduce system load
+        static uint32_t lastFeedbackTime = 0;
+        uint32_t currentTime = millis();
 
-      // Determine direction and apply deadband compensation
-      int dir = 1;
-      if (u < 0) {
-        dir = -1;
-      }
+        if (currentTime - lastFeedbackTime >= 100) {  // 10Hz feedback rate
+          lastFeedbackTime = currentTime;
 
-      if (pwr < DEADBAND) {
-        pwr = 0;
-      }
+          // Update feedback message
+          feedback_msg.current_position = currentPos;
+          feedback_msg.target_position = motor.target;
+          feedback_msg.current_error = e;
 
-      setMotor(dir, pwr, PWM, IN1, IN2);
-      motor.eprev = e;
+          // Release mutex before communication
+          xSemaphoreGive(pidMutex);
 
-      xSemaphoreGive(pidMutex);
-
-      //TickType_t currentTime = xTaskGetTickCount();
-      // Publish feedback
-      rcl_ret_t ret = rclc_action_publish_feedback(&goal_handle, &feedback_msg);
-
-      if (ret != RCL_RET_OK) {
-        printf("Error publishing feedback: %d\n", ret);
-      }
-
-      // Check if goal is achieved
-      if (abs(e) < DEADBAND) {
-        // Wait for stability
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        // Recheck position to confirm stability
-        currentPos = getPosition();
-        if (abs(motor.target - currentPos) < DEADBAND) {
-          motor.goalActive = false;
-          result_msg.final_error = motor.target - currentPos;
-
-          // Send result
-          rcl_ret_t result_ret = rclc_action_send_result(
-            &goal_handle,
-            GOAL_STATE_SUCCEEDED,
-            &result_msg);
-
-          if (result_ret != RCL_RET_OK) {
-            Serial.printf("Error sending result: %d\n", result_ret);
+          // Send feedback
+          rcl_ret_t ret = rclc_action_publish_feedback(&goal_handle, &feedback_msg);
+          if (ret != RCL_RET_OK) {
+            Serial.printf("Feedback error: %d\n", ret);
           }
+
+          // Check for goal completion
+          if (abs(e) < DEADBAND) {
+            static int stableCount = 0;
+            stableCount++;
+
+            if (stableCount >= 5) {  // Reduced stability count
+              motor.goalActive = false;
+              result_msg.final_error = e;
+
+              ret = rclc_action_send_result(&goal_handle, GOAL_STATE_SUCCEEDED, &result_msg);
+              if (ret != RCL_RET_OK) {
+                Serial.printf("Result error: %d\n", ret);
+              }
+
+              stableCount = 0;
+            }
+          }
+        } else {
+          xSemaphoreGive(pidMutex);
         }
       }
+    } else {
+      // If no active goal, just delay
+      vTaskDelay(pdMS_TO_TICKS(10));
     }
+
     // Ensure consistent timing
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
   }
@@ -257,7 +289,10 @@ void loop() {
       }
     }
   }
-
+  // In loop()
+  if (uxTaskGetStackHighWaterMark(NULL) < 500) {
+    Serial.println("Warning: Low stack space");
+  }
   delay(10);
 }
 
@@ -271,21 +306,25 @@ void loop() {
 bool initializeMicroRos() {
   allocator = rcl_get_default_allocator();
 
-  // Set up transport
   Serial.println("Setting up micro-ROS transport");
   set_microros_wifi_transports((char *)ssid, (char *)password,
                                (char *)agent_ip, agent_port);
   delay(2000);
 
-  // Wait for agent connection
+  // Wait for agent connection with improved error handling
   bool connected = false;
   int attempts = 0;
   const int max_attempts = 5;
 
   while (!connected && attempts < max_attempts) {
+    Serial.print("Attempting to connect to agent (attempt ");
+    Serial.print(attempts + 1);
+    Serial.println("/5)");
+
     connected = rmw_uros_ping_agent(WIFI_TIMEOUT_MS, 1) == RMW_RET_OK;
     attempts++;
-    if (!connected) {
+
+    if (!connected && attempts < max_attempts) {
       Serial.println("Could not connect to micro-ROS agent, retrying...");
       delay(1000);
     }
@@ -296,29 +335,22 @@ bool initializeMicroRos() {
     return false;
   }
 
-  // Initialize ROS 2 node
+  Serial.println("Connected to micro-ROS agent");
+
   rcl_ret_t ret = rclc_support_init(&support, 0, NULL, &allocator);
   if (ret != RCL_RET_OK) {
-    Serial.println("Failed to initialize support");
+    Serial.printf("Failed to initialize support: %d\n", ret);
     return false;
   }
 
   ret = rclc_node_init_default(&node, "tune_pid_node", "", &support);
   if (ret != RCL_RET_OK) {
-    Serial.println("Failed to initialize node");
+    Serial.printf("Failed to initialize node: %d\n", ret);
     return false;
   }
+  Serial.println("Initializing action server...");
 
-  // Allocate memory for goal_msg
-  rl_pid_uros__action__TunePID_Goal *goal_msg =
-    (rl_pid_uros__action__TunePID_Goal *)malloc(sizeof(rl_pid_uros__action__TunePID_Goal));
-
-  if (goal_msg == NULL) {
-    Serial.println("Failed to allocate memory for goal_msg");
-    return false;
-  }
-
-  // Initialize action server
+  // Initialize the action server
   ret = rclc_action_server_init_default(
     &action_server,
     &node,
@@ -327,69 +359,110 @@ bool initializeMicroRos() {
     "tune_pid_action");
 
   if (ret != RCL_RET_OK) {
-    printf("Error initializing action server: %d\n", ret);
+    Serial.printf("Failed to initialize action server: %d\n", ret);
     return false;
   }
-
-  // Initialize executor
-  rclc_executor_init(&executor, &support.context, 2, &allocator);
+  // Initialize executor with sufficient handles
+  executor = rclc_executor_get_zero_initialized_executor();
+  ret = rclc_executor_init(&executor, &support.context, 2, &allocator);
   if (ret != RCL_RET_OK) {
-    Serial.println("Failed to initialize executor");
+    Serial.printf("Failed to initialize executor: %d\n", ret);
     return false;
   }
-
-  // Add action server to executor with correct parameters
+  // Add action server to executor with proper context
   ret = rclc_executor_add_action_server(
     &executor,
     &action_server,
-    1,  // handles number
-    goal_msg,
-    sizeof(rl_pid_uros__action__TunePID_Goal),
+    1,
+    &goal_msg,
+    sizeof(&goal_msg),
     handle_goal,
     handle_cancel,
-    NULL  // goal request size pointer (optional)
-  );
+    &goal_msg);
 
   if (ret != RCL_RET_OK) {
-    printf("Error adding action server to executor: %d\n", ret);
-    free(goal_msg);
+    Serial.printf("Error adding action server to executor: %d\n", ret);
     return false;
   }
+  Serial.println("Action server initialized");
   Serial.println("micro-ROS initialized successfully");
   return true;
 }
 
-static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, void *context) {
+/*static rcl_ret_t accept_goal(const rcl_action_goal_handle_t *goal_handle){
+  if (!rcl_action_goal_handle_is_active(goal_handle))
+  {
+    return RCL_RET_ACTION_GOAL_ACCEPTED;
+  }
+}*/
 
-  if (context == NULL) {
-    Serial.println("Error: Received NULL goal context");
+// Keep the better implementation of handle_goal and remove the duplicate
+static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, auto context) {
+  Serial.println("=== Goal Handler Entry ===");
+
+  if (goal_handle == NULL) {
+    Serial.println("Error: Goal handle is NULL");
+    return RCL_RET_ERROR;
+  }
+  auto goal = (rl_pid_uros__action__TunePID_Goal *)context;
+
+  Serial.println("=== Raw Goal Values ===");
+  Serial.print("KP raw: ");
+  Serial.println(goal->kp, 2);
+  Serial.print("KI raw: ");
+  Serial.println(goal->ki, 2);
+  Serial.print("KD raw: ");
+  Serial.println(goal->kd, 2);
+  Serial.print("Target raw: ");
+  Serial.println(goal->target_position);
+
+  // Validate goal parameters
+  if (isnan(goal->kp) || isnan(goal->ki) || isnan(goal->kd)) {
+    Serial.println("Error: Invalid PID parameters (NaN detected)");
     return RCL_RET_ERROR;
   }
 
-
-  const rl_pid_uros__action__TunePID_Goal *goal =
-    (const rl_pid_uros__action__TunePID_Goal *)context;
-
-  Serial.printf("Received Goal - kp: %f, ki: %f, kd: %f, target_position: %d\n",
-                goal->kp, goal->ki, goal->kd, goal->target_position);
-
-  // Validate goal parameters
-  if (goal->kp < 0.0 || goal->ki < 0.0 || goal->kd < 0.0 || goal->target_position < 0) {
-    Serial.println("Goal parameters out of range, rejecting goal");
-    return RCL_RET_ACTION_GOAL_REJECTED;
+  // Add range checking
+  const float MAX_PID_VALUE = 10.0;
+  const int MAX_TARGET_VALUE = 360;
+  if ((goal->kp != 0.0d && fabs(goal->kp) > MAX_PID_VALUE) || (goal->ki != 0.0d && fabs(goal->ki) > MAX_PID_VALUE) || (goal->kd != 0.0d && fabs(goal->kd) > MAX_PID_VALUE) || (goal->target_position >=0 && fabs(goal->target_position) > MAX_TARGET_VALUE)) {
+    Serial.println("Error: Non-zero PID parameters out of valid range");
+    return RCL_RET_ERROR;
   }
 
-  xSemaphoreTake(pidMutex, portMAX_DELAY);
+  // Debug prints with safe formatting
+  Serial.println("=== Goal Content ===");
+  char buffer[50];
+  snprintf(buffer, sizeof(buffer), "KP: %.6f", goal->kp);
+  Serial.println(buffer);
+  snprintf(buffer, sizeof(buffer), "KI: %.6f", goal->ki);
+  Serial.println(buffer);
+  snprintf(buffer, sizeof(buffer), "KD: %.6f", goal->kd);
+  Serial.println(buffer);
+  snprintf(buffer, sizeof(buffer), "Target Position: %d", goal->target_position);
+  Serial.println(buffer);
+
+  // Take mutex for motor updates
+  if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    Serial.println("Error: Could not obtain mutex lock");
+    return RCL_RET_ERROR;
+  }
+
+  // Update motor parameters with validated values
   motor.kp = goal->kp;
   motor.ki = goal->ki;
   motor.kd = goal->kd;
   motor.target = goal->target_position;
+  motor.eprev = 0;
+  motor.eintegral = 0;
   motor.goalActive = true;
-  xSemaphoreGive(pidMutex);
 
-  Serial.println("Goal accepted");
+  xSemaphoreGive(pidMutex);
+  Serial.println("=== Goal Accepted ===");
+
   return RCL_RET_ACTION_GOAL_ACCEPTED;
 }
+
 
 static bool handle_cancel(rclc_action_goal_handle_t *goal_handle, void *context) {
   (void)goal_handle;
