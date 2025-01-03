@@ -4,7 +4,7 @@
   <name>rl_pid_uros</name>
   <version>0.0.0</version>
   <description>A reinforcement learning based PID controller for an encoder motor using ros2 and microros as middleware</description>
-  <maintainer email="arvindh1793@gmail.com">Arvindh_R</maintainer>
+  <maintainer email="arvindh.r@outlook.com">Arvindh_R</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>ament_cmake_python</buildtool_depend>
