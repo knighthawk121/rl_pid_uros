@@ -14,14 +14,14 @@ find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(action_msgs REQUIRED)
-
+find_package(actionlib_msgs REQUIRED)
 # Generate interfaces for services and actions
 # Note: Files are relative to the package root directory
 rosidl_generate_interfaces(${PROJECT_NAME}
   # Make sure these files exist exactly as named
   "srv/Tminusp.srv"
   "action/TunePID.action"
-  DEPENDENCIES action_msgs
+  DEPENDENCIES action_msgs actionlib_msgs std_msgs
 )
 
 # Install Python modules
