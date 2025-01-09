@@ -1,3 +1,23 @@
+/*
+ * motor_test_esp32.ino
+ *
+ * This program controls a motor using an ESP32 microcontroller. 
+ * It includes functionality for reading encoder feedback, 
+ * controlling motor speed and direction with PWM signals, 
+ * and implementing motor standby. 
+ * The code is set up for high-speed communication and precise motor control.
+ *
+ * Components:
+ * - Encoder feedback (pins ENCA, ENCB)
+ * - Motor speed control (PWM pin)
+ * - Motor direction control (IN1, IN2)
+ * - Standby mode (STBY pin)
+ *
+ * Author: Arvindh Ramesh
+ *
+ */
+
+
 #define ENCA 18  // Encoder A pin
 #define ENCB 19  // Encoder B pin
 #define PWM 14   // PWM pin for motor speed control

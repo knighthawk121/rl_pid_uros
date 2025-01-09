@@ -1,3 +1,21 @@
+/*
+ * rl_pid_actions_wifi_udp.ino
+ *
+ * This program integrates PID control with Reinforcement Learning (RL)
+ * using a micro-ROS framework over WiFi (UDP protocol).
+ * It enables real-time tuning of PID parameters through
+ * custom ROS 2 action interfaces,
+ * supporting wireless communication with an ESP32 microcontroller.
+ *
+ * Features:
+ * - WiFi-based UDP communication
+ * - ROS 2 custom action integration
+ * - PID tuning with RL support
+ *
+ * Author: Arvindh Ramesh
+ *
+ */
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <micro_ros_arduino.h>
@@ -13,7 +31,6 @@
 #include <action_msgs/msg/goal_status.h>
 #include <rcl_action/goal_handle.h>
 
-
 // Custom action interface includes
 #include <rl_pid_uros/action/tune_pid.h>
 
@@ -27,7 +44,7 @@
 
 #define WIFI_TIMEOUT_MS 10000
 #define WIFI_RECOVER_TIME_MS 5000
-#define MOTOR_TASK_PRIORITY 2  // Increased priority
+#define MOTOR_TASK_PRIORITY 2 // Increased priority
 #define PWM_FREQUENCY 1000
 #define PWM_RESOLUTION 8
 #define FEEDBACK_FREQUENCY_MS 100
@@ -35,11 +52,11 @@
 #define MAX_RECONNECT_ATTEMPTS 5
 #define MIN_PWM_VALUE 0
 #define MAX_PWM_VALUE 255
-#define STACK_SIZE (8192 * 2)  // Increased stack size
-#define MIN_DELTA_T 0.001      // 1ms minimum time delta
+#define STACK_SIZE (8192 * 2) // Increased stack size
+#define MIN_DELTA_T 0.001     // 1ms minimum time delta
 #define EPSILON 1.0e-6
-#define DEADBAND 5          // Reduced deadband
-#define MAX_INTEGRAL 100.0  // Red
+#define DEADBAND 5 // Reduced deadband
+#define MAX_INTEGRAL 100.0
 
 // WiFi Credentials
 const char *ssid = "YOUR_SSID";
@@ -52,7 +69,8 @@ static portMUX_TYPE positionMux = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t pidMutex = NULL;
 
 // Motor Control Structure
-struct MotorControl {
+struct MotorControl
+{
   volatile int position;
   long long target;
   double kp;
@@ -67,17 +85,16 @@ struct MotorControl {
 
 // Global variables
 MotorControl motor = {
-  .position = 0,
-  .target = 0,
-  .kp = 1.0,
-  .ki = 0.0,
-  .kd = 0.01,
-  .eprev = 0,
-  .eintegral = 0,
-  .prevT = 0,
-  .updateInProgress = false,
-  .goalActive = false
-};
+    .position = 0,
+    .target = 0,
+    .kp = 1.0,
+    .ki = 0.0,
+    .kd = 0.01,
+    .eprev = 0,
+    .eintegral = 0,
+    .prevT = 0,
+    .updateInProgress = false,
+    .goalActive = false};
 
 // Global declarations
 rcl_node_t node;
@@ -97,95 +114,89 @@ void setMotor(int dir, int pwmVal, int pwm, int in1, int in2);
 int getPosition();
 void IRAM_ATTR readEncoder();
 
-// Callback function prototypes with correct signatures
-//rcl_ret_t accept_goal(const rcl_action_goal_handle_t *goal_handle);
-//rcl_ret_t handle_goal(const rcl_action_goal_handle_t *goal_handle, const void *goal);
-//bool handle_cancel(const rcl_action_goal_handle_t *goal_handle, void *context);
-
 // Action messages
 static bool goal_msg_initialized = false;
-// First, update global declarations
+// updating global declarations
 static rl_pid_uros__action__TunePID_Goal goal_msg = {
-  .kp = 0.0d,
-  .ki = 0.0d,
-  .kd = 0.0d,
-  .target_position = 0
-};
+    .kp = 0.0d,
+    .ki = 0.0d,
+    .kd = 0.0d,
+    .target_position = 0};
 
 static rl_pid_uros__action__TunePID_Feedback feedback_msg = {
-  .current_error = 0,
-  .current_position = 0,
-  .target_position = 0
+    .current_error = 0,
+    .current_position = 0,
+    .target_position = 0
 
 };
 
 static rl_pid_uros__action__TunePID_Result result_msg = {
-  .final_error = 0
-};
+    .final_error = 0};
 
+/*================================setup, loop and motor control implementation==================================*/
 
-void setup() {
+void setup()
+{
   Serial.begin(115200);
 
   // Initialize mutex
   pidMutex = xSemaphoreCreateMutex();
-  if (pidMutex == NULL) {
+  if (pidMutex == NULL)
+  {
     printf("Error creating mutex\n");
     return;
   }
 
   initializePins();
-
-  if (!initializeWiFi()) {
+  if (!initializeWiFi())
+  {
+    return;
+  }
+  if (!initializeMicroRos())
+  {
     return;
   }
 
-  if (!initializeMicroRos()) {
-    return;
-  }
-
-  // In setup(), update task creation:
+  // Pinning the motor task to the core
   BaseType_t xReturned = xTaskCreatePinnedToCore(
-    motorControlTask,
-    "Motor Control",
-    STACK_SIZE,
-    NULL,
-    MOTOR_TASK_PRIORITY,
-    NULL,
-    1);  // Run on core 1
+      motorControlTask,
+      "Motor Control",
+      STACK_SIZE,
+      NULL,
+      MOTOR_TASK_PRIORITY,
+      NULL,
+      1); // Run on core 1
 
-  // In your setup() function:
+  // error checking
   esp_task_wdt_config_t twdt_config = {
-    .timeout_ms = 10000,                                           // 10 seconds
-    .idle_core_mask = (1 << CONFIG_FREERTOS_NUMBER_OF_CORES) - 1,  // Bitmask of all cores
-    .trigger_panic = true
-  };
-
-  /* esp_task_wdt_init(&twdt_config);
-  if (xReturned != pdPASS) {
-    Serial.println("Failed to create motor control task");
-    return;
-  }*/
+      .timeout_ms = 10000,                                          // 10 seconds
+      .idle_core_mask = (1 << CONFIG_FREERTOS_NUMBER_OF_CORES) - 1, // Bitmask of all cores
+      .trigger_panic = true};
 }
 
 // running motor control task independent of loop function.
-void motorControlTask(void *arg) {
+void motorControlTask(void *arg)
+{
   TickType_t xLastWakeTime = xTaskGetTickCount();
-  const TickType_t xFrequency = pdMS_TO_TICKS(20);  // Reduced to 50Hz to lower system load
+  const TickType_t xFrequency = pdMS_TO_TICKS(20);
 
-  while (1) {
-    if (motor.goalActive) {
+  while (1)
+  {
+    if (motor.goalActive)
+    {
       // Add delay at the start to prevent watchdog triggers
       vTaskDelay(pdMS_TO_TICKS(1));
 
-      if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+      if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(50)) == pdTRUE)
+      {
         // Get current time and position
         long currT = micros();
         double deltaT = ((float)(currT - motor.prevT)) / 1.0e6;
-        if (deltaT <= 0) {
+        if (deltaT <= 0)
+        {
           Serial.println("Error: Invalid time delta");
           return;
-        }  // Ensure minimum deltaT
+        } // Ensure minimum deltaT
         deltaT = max(deltaT, MIN_DELTA_T);
         motor.prevT = currT;
 
@@ -205,7 +216,8 @@ void motorControlTask(void *arg) {
         int dir = (pidOutput >= 0) ? 1 : -1;
 
         // Apply deadband
-        if (pwr < DEADBAND) {
+        if (pwr < DEADBAND)
+        {
           pwr = 0;
           dir = 0;
         }
@@ -218,7 +230,8 @@ void motorControlTask(void *arg) {
         static uint32_t lastFeedbackTime = 0;
         uint32_t currentTime = millis();
 
-        if (currentTime - lastFeedbackTime >= 100) {  // 10Hz feedback rate
+        if (currentTime - lastFeedbackTime >= 100)
+        { // 10Hz feedback rate
           lastFeedbackTime = currentTime;
 
           // Update feedback message
@@ -231,32 +244,40 @@ void motorControlTask(void *arg) {
 
           // Send feedback
           rcl_ret_t ret = rclc_action_publish_feedback(&goal_handle, &feedback_msg);
-          if (ret != RCL_RET_OK) {
+          if (ret != RCL_RET_OK)
+          {
             Serial.printf("Feedback error: %d\n", ret);
           }
 
           // Check for goal completion
-          if (abs(e) < DEADBAND) {
+          if (abs(e) < DEADBAND)
+          {
             static int stableCount = 0;
             stableCount++;
 
-            if (stableCount >= 5) {  // Reduced stability count
+            if (stableCount >= 5)
+            { // Reduced stability count
               motor.goalActive = false;
               result_msg.final_error = e;
 
               ret = rclc_action_send_result(&goal_handle, GOAL_STATE_SUCCEEDED, &result_msg);
-              if (ret != RCL_RET_OK) {
+              if (ret != RCL_RET_OK)
+              {
                 Serial.printf("Result error: %d\n", ret);
               }
 
               stableCount = 0;
             }
           }
-        } else {
+        }
+        else
+        {
           xSemaphoreGive(pidMutex);
         }
       }
-    } else {
+    }
+    else
+    {
       // If no active goal, just delay
       vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -266,22 +287,26 @@ void motorControlTask(void *arg) {
   }
 }
 
-void loop() {
+void loop()
+{
   static unsigned long lastWiFiCheck = 0;
-  const unsigned long WIFI_CHECK_INTERVAL = 5000;  // Check every 5 seconds
+  const unsigned long WIFI_CHECK_INTERVAL = 5000; // Check every 5 seconds
 
   rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
 
   // Periodic WiFi check
   unsigned long currentMillis = millis();
-  if (currentMillis - lastWiFiCheck >= WIFI_CHECK_INTERVAL) {
+  if (currentMillis - lastWiFiCheck >= WIFI_CHECK_INTERVAL)
+  {
     lastWiFiCheck = currentMillis;
 
-    if (WiFi.status() != WL_CONNECTED) {
+    if (WiFi.status() != WL_CONNECTED)
+    {
       Serial.println("WiFi connection lost!");
 
       // Try to reconnect
-      if (!initializeWiFi()) {
+      if (!initializeWiFi())
+      {
         // If reconnection fails after all attempts, restart
         Serial.println("Failed to reconnect, restarting...");
         vTaskDelay(pdMS_TO_TICKS(WIFI_RECOVER_TIME_MS));
@@ -290,20 +315,17 @@ void loop() {
     }
   }
   // In loop()
-  if (uxTaskGetStackHighWaterMark(NULL) < 500) {
+  if (uxTaskGetStackHighWaterMark(NULL) < 500)
+  {
     Serial.println("Warning: Low stack space");
   }
   delay(10);
 }
 
+/*===============================================micro-ros intialization and definition=========================================*/
 
-
-
-
-// micro-ros action server intialization and definition
-// Callback function prototypes with correct signatures
-
-bool initializeMicroRos() {
+bool initializeMicroRos()
+{
   allocator = rcl_get_default_allocator();
 
   Serial.println("Setting up micro-ROS transport");
@@ -311,76 +333,84 @@ bool initializeMicroRos() {
                                (char *)agent_ip, agent_port);
   delay(2000);
 
-  // Wait for agent connection with improved error handling
+  // Wait for agent connection
   bool connected = false;
   int attempts = 0;
   const int max_attempts = 5;
 
-  while (!connected && attempts < max_attempts) {
+  while (!connected && attempts < max_attempts)
+  {
     Serial.print("Attempting to connect to agent (attempt ");
     Serial.print(attempts + 1);
     Serial.println("/5)");
 
-    connected = rmw_uros_ping_agent(WIFI_TIMEOUT_MS, 1) == RMW_RET_OK;
+    connected = rmw_uros_ping_agent(WIFI_TIMEOUT_MS, 1) == RMW_RET_OK; // ping agent
     attempts++;
 
-    if (!connected && attempts < max_attempts) {
+    if (!connected && attempts < max_attempts)
+    {
       Serial.println("Could not connect to micro-ROS agent, retrying...");
       delay(1000);
     }
   }
 
-  if (!connected) {
+  if (!connected)
+  {
     Serial.println("Failed to connect to micro-ROS agent");
     return false;
   }
 
   Serial.println("Connected to micro-ROS agent");
 
-  rcl_ret_t ret = rclc_support_init(&support, 0, NULL, &allocator);
-  if (ret != RCL_RET_OK) {
+  rcl_ret_t ret = rclc_support_init(&support, 0, NULL, &allocator); // support initialization
+  if (ret != RCL_RET_OK)
+  {
     Serial.printf("Failed to initialize support: %d\n", ret);
     return false;
   }
 
-  ret = rclc_node_init_default(&node, "tune_pid_node", "", &support);
-  if (ret != RCL_RET_OK) {
+  ret = rclc_node_init_default(&node, "tune_pid_node", "", &support); // node intialization
+  if (ret != RCL_RET_OK)
+  {
     Serial.printf("Failed to initialize node: %d\n", ret);
     return false;
   }
   Serial.println("Initializing action server...");
 
-  // Initialize the action server
+  // action server intialization
   ret = rclc_action_server_init_default(
-    &action_server,
-    &node,
-    &support,
-    ROSIDL_GET_ACTION_TYPE_SUPPORT(rl_pid_uros, TunePID),
-    "tune_pid_action");
+      &action_server,
+      &node,
+      &support,
+      ROSIDL_GET_ACTION_TYPE_SUPPORT(rl_pid_uros, TunePID),
+      "tune_pid_action");
 
-  if (ret != RCL_RET_OK) {
+  if (ret != RCL_RET_OK)
+  {
     Serial.printf("Failed to initialize action server: %d\n", ret);
     return false;
   }
-  // Initialize executor with sufficient handles
+  // executor intialization
   executor = rclc_executor_get_zero_initialized_executor();
   ret = rclc_executor_init(&executor, &support.context, 2, &allocator);
-  if (ret != RCL_RET_OK) {
+  if (ret != RCL_RET_OK)
+  {
     Serial.printf("Failed to initialize executor: %d\n", ret);
     return false;
   }
-  // Add action server to executor with proper context
+  // Adding action server to executor
   ret = rclc_executor_add_action_server(
-    &executor,
-    &action_server,
-    1,
-    &goal_msg,
-    sizeof(&goal_msg),
-    handle_goal,
-    handle_cancel,
-    &goal_msg);
+      &executor,
+      &action_server,
+      1,
+      &goal_msg,
+      sizeof(&goal_msg),
+      handle_goal,
+      handle_cancel,
+      &goal_msg);
 
-  if (ret != RCL_RET_OK) {
+  if (ret != RCL_RET_OK)
+  {
     Serial.printf("Error adding action server to executor: %d\n", ret);
     return false;
   }
@@ -389,18 +419,14 @@ bool initializeMicroRos() {
   return true;
 }
 
-/*static rcl_ret_t accept_goal(const rcl_action_goal_handle_t *goal_handle){
-  if (!rcl_action_goal_handle_is_active(goal_handle))
-  {
-    return RCL_RET_ACTION_GOAL_ACCEPTED;
-  }
-}*/
+// Goal handle callback implementation
 
-// Keep the better implementation of handle_goal and remove the duplicate
-static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, auto context) {
+static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, auto context)
+{
   Serial.println("=== Goal Handler Entry ===");
 
-  if (goal_handle == NULL) {
+  if (goal_handle == NULL)
+  {
     Serial.println("Error: Goal handle is NULL");
     return RCL_RET_ERROR;
   }
@@ -417,7 +443,8 @@ static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, auto contex
   Serial.println(goal->target_position);
 
   // Validate goal parameters
-  if (isnan(goal->kp) || isnan(goal->ki) || isnan(goal->kd)) {
+  if (isnan(goal->kp) || isnan(goal->ki) || isnan(goal->kd))
+  {
     Serial.println("Error: Invalid PID parameters (NaN detected)");
     return RCL_RET_ERROR;
   }
@@ -425,7 +452,8 @@ static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, auto contex
   // Add range checking
   const float MAX_PID_VALUE = 10.0;
   const int MAX_TARGET_VALUE = 360;
-  if ((goal->kp != 0.0d && fabs(goal->kp) > MAX_PID_VALUE) || (goal->ki != 0.0d && fabs(goal->ki) > MAX_PID_VALUE) || (goal->kd != 0.0d && fabs(goal->kd) > MAX_PID_VALUE) || (goal->target_position >=0 && fabs(goal->target_position) > MAX_TARGET_VALUE)) {
+  if ((goal->kp != 0.0d && fabs(goal->kp) > MAX_PID_VALUE) || (goal->ki != 0.0d && fabs(goal->ki) > MAX_PID_VALUE) || (goal->kd != 0.0d && fabs(goal->kd) > MAX_PID_VALUE) || (goal->target_position >= 0 && fabs(goal->target_position) > MAX_TARGET_VALUE))
+  {
     Serial.println("Error: Non-zero PID parameters out of valid range");
     return RCL_RET_ERROR;
   }
@@ -443,7 +471,8 @@ static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, auto contex
   Serial.println(buffer);
 
   // Take mutex for motor updates
-  if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+  if (xSemaphoreTake(pidMutex, pdMS_TO_TICKS(100)) != pdTRUE)
+  {
     Serial.println("Error: Could not obtain mutex lock");
     return RCL_RET_ERROR;
   }
@@ -463,8 +492,8 @@ static rcl_ret_t handle_goal(rclc_action_goal_handle_t *goal_handle, auto contex
   return RCL_RET_ACTION_GOAL_ACCEPTED;
 }
 
-
-static bool handle_cancel(rclc_action_goal_handle_t *goal_handle, void *context) {
+static bool handle_cancel(rclc_action_goal_handle_t *goal_handle, void *context)
+{
   (void)goal_handle;
   (void)context;
 
@@ -475,9 +504,10 @@ static bool handle_cancel(rclc_action_goal_handle_t *goal_handle, void *context)
   return true;
 }
 
-//motor control, wifi and pin definitions
+/*======================================motor control, wifi and pin definitions============================================*/
 
-void initializePins() {
+void initializePins()
+{
   pinMode(ENCA, INPUT_PULLUP);
   pinMode(ENCB, INPUT_PULLUP);
   pinMode(IN1, OUTPUT);
@@ -490,20 +520,24 @@ void initializePins() {
   attachInterrupt(digitalPinToInterrupt(ENCA), readEncoder, RISING);
 }
 
-bool initializeWiFi() {
+bool initializeWiFi()
+{
   unsigned long startAttemptTime = millis();
   int attempts = 0;
 
-  while (attempts < MAX_RECONNECT_ATTEMPTS) {
+  while (attempts < MAX_RECONNECT_ATTEMPTS)
+  {
     WiFi.begin(ssid, password);
 
     unsigned long attemptStartTime = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - attemptStartTime < WIFI_TIMEOUT_MS) {
+    while (WiFi.status() != WL_CONNECTED && millis() - attemptStartTime < WIFI_TIMEOUT_MS)
+    {
       delay(100);
       Serial.print(".");
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
+    if (WiFi.status() == WL_CONNECTED)
+    {
       Serial.println("\nWiFi connected");
       Serial.print("IP address: ");
       Serial.println(WiFi.localIP());
@@ -520,14 +554,16 @@ bool initializeWiFi() {
   return false;
 }
 
-void setMotor(int dir, int pwmVal, int pwm, int in1, int in2) {
+void setMotor(int dir, int pwmVal, int pwm, int in1, int in2)
+{
   digitalWrite(STBY, HIGH);
   ledcWrite(pwm, pwmVal);
   digitalWrite(in1, dir == 1 ? HIGH : LOW);
   digitalWrite(in2, dir == 1 ? LOW : HIGH);
 }
 
-int getPosition() {
+int getPosition()
+{
   int pos;
   portENTER_CRITICAL(&positionMux);
   pos = motor.position;
@@ -536,12 +572,16 @@ int getPosition() {
 }
 
 // Interrupt handler for encoder
-void IRAM_ATTR readEncoder() {
+void IRAM_ATTR readEncoder()
+{
   int b = digitalRead(ENCB);
   portENTER_CRITICAL_ISR(&positionMux);
-  if (b > 0) {
+  if (b > 0)
+  {
     motor.position++;
-  } else {
+  }
+  else
+  {
     motor.position--;
   }
   portEXIT_CRITICAL_ISR(&positionMux);
