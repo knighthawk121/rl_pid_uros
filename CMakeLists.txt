@@ -46,14 +46,14 @@ install(PROGRAMS
 
 install(PROGRAMS
   scripts/launch_action.py
-  DESTINATION lib/${PROJECT_NAME}
+  DESTINATION share/${PROJECT_NAME}
   RENAME rl_action
 )
 
 
 install(PROGRAMS
   scripts/launch_service.py
-  DESTINATION lib/${PROJECT_NAME}
+  DESTINATION share/${PROJECT_NAME}
   RENAME rl_service
 )
 
