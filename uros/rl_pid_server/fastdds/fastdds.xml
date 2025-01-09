@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <profiles>
+        <participant profile_name="default_profile" is_default_profile="true">
+            <rtps>
+                <builtin>
+                    <discovery_config>
+                        <initialAnnouncements>
+                            <count>5</count>
+                            <period>
+                                <sec>0</sec>
+                                <nanosec>100000000</nanosec>
+                            </period>
+                        </initialAnnouncements>
+                        <leaseAnnouncement>
+                            <sec>1</sec>
+                            <nanosec>856000000</nanosec>
+                        </leaseAnnouncement>
+                    </discovery_config>
+                </builtin>
+                <portParams>
+                    <port>7400</port>
+                    <domainIDGain>200</domainIDGain>
+                    <participantIDGain>2</participantIDGain>
+                </portParams>
+            </rtps>
+        </participant>
+    </profiles>
+</dds>
