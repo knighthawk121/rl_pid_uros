@@ -37,9 +37,24 @@ install(PROGRAMS
 )
 
 install(PROGRAMS
+  scripts/rl_pid.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME pid_tuner_service
+)
+
+
+
+install(PROGRAMS
   launch/launch.py
   DESTINATION lib/${PROJECT_NAME}
-  RENAME launch
+  RENAME rl_action
+)
+
+
+install(PROGRAMS
+  launch/launch_service.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME rl_service
 )
 
 
