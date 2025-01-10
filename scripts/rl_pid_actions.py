@@ -33,8 +33,11 @@ class MotorPIDTuner(Node):
         self.initial_kp = 0.5  # Start with non-zero values
         self.initial_ki = 0.0
         self.initial_kd = 0.01
-        
-        self.get_logger().info('Q-learning agent initialized')
+        self.get_logger().info(f'Q-learning agent initialized with {self.agent.episode_count} previous episodes')
+        if self.agent.best_pid_values is not None:
+            self.get_logger().info(f'Best known PID values - Kp: {self.agent.best_pid_values[0]:.4f}, '
+                                f'Ki: {self.agent.best_pid_values[1]:.4f}, '
+                                f'Kd: {self.agent.best_pid_values[2]:.4f}')
         self.get_logger().info('Waiting for action server...')
         self.action_client.wait_for_server()
         self.get_logger().info('Action server is available!')
@@ -122,6 +125,7 @@ class MotorPIDTuner(Node):
                     self.agent.update(state, (kp, ki, kd), reward, next_state)
                 else:
                     self.get_logger().warn('Goal finished without result')
+                
                     
             except asyncio.TimeoutError:
                 self.get_logger().error('Goal timed out!')
