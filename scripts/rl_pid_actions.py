@@ -142,26 +142,33 @@ class MotorPIDTuner(Node):
     def calculate_episode_reward(self):
         """Calculate reward based on feedback history"""
         if not self.feedback_history:
-            return 0.0
+            return -1000.0  # Large penalty for no feedback
             
-        errors = [fb['error'] for fb in self.feedback_history]
-        avg_error = np.mean(np.abs(errors))
-        max_error = np.max(np.abs(errors))
-        settling_time = len(self.feedback_history) * 0.1
+        errors = np.array([abs(fb['error']) for fb in self.feedback_history])
         
-        reward = -(
-            0.5 * avg_error +
-            0.3 * max_error +
-            0.2 * settling_time
+        # Metrics for reward calculation
+        final_error = errors[-1]
+        settling_time = len(errors)
+        overshoot = np.max(errors) - final_error
+        
+        # Reward components
+        error_reward = -final_error
+        settling_reward = -settling_time
+        overshoot_reward = -overshoot
+        
+        total_reward = (
+            0.5 * error_reward + 
+            0.3 * settling_reward + 
+            0.2 * overshoot_reward
         )
         
-        return reward
+        return float(total_reward)
 
     def get_current_state(self):
         """Get current state for Q-learning"""
         if self.latest_feedback is not None:
-            return int(self.latest_feedback.current_error)
-        return 0
+            return self.latest_feedback.current_error
+        return 0.0
 
 def main(args=None):
     rclpy.init(args=args)
