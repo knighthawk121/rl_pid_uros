@@ -143,16 +143,28 @@ class MotorPIDTuner(Node):
                     reward = self.calculate_episode_reward()
                     next_state = self.get_current_state()
                     
+                    # Modified section of send_new_goal method
                     if isinstance(self.agent, SARSAAgent):
                         next_pid_values = self.agent.get_pid_values(next_state)
                         self.agent.update(state, (kp, ki, kd), reward, next_state, next_pid_values)
                     elif isinstance(self.agent, DQNAgent):
-                        action = self.agent.get_action_index((kp, ki, kd))
-                        self.agent.remember(state, action, reward, next_state, True)
+                        # Convert PID values to state tensor for DQN
+                        current_state = torch.FloatTensor([state])
+                        next_state_tensor = torch.FloatTensor([next_state])
+                        
+                        # Store experience in replay buffer
+                        self.agent.remember(current_state.numpy(), 
+                                         (kp, ki, kd), 
+                                         reward, 
+                                         next_state_tensor.numpy(), 
+                                         True)
                         self.agent.replay()
+                        
+                        # Update target network periodically
+                        if self.agent.episode_count % 10 == 0:
+                            self.agent.update_target_model()
                     else:  # QLearningAgent
                         self.agent.update(state, (kp, ki, kd), reward, next_state)
-                        
             except asyncio.TimeoutError:
                 self.get_logger().error('Goal timed out!')
                 if self.current_goal_handle:
