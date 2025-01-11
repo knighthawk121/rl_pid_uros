@@ -183,19 +183,32 @@ class MotorPIDTuner(Node):
         errors = [abs(fb['error']) for fb in self.feedback_history]
         final_error = errors[-1]
         settling_time = len(errors) * 0.1
-        max_overshoot = max(errors) if errors else float('inf')
         
-        # Reward factors
+        # New termination checks
+        steady_state_reached = all(abs(e) < 2.0 for e in errors[-5:])  # Last 5 errors within ±2
+        max_time_exceeded = settling_time > 5.0  # 5 seconds max
+        
+        # Calculate velocity from position history
+        positions = [fb['position'] for fb in self.feedback_history]
+        velocities = np.diff(positions) / 0.1  # 10Hz sampling
+        motor_stalled = len(velocities) > 5 and all(abs(v) < 1.0 for v in velocities[-5:])
+        
+        # Early termination penalties
+        if max_time_exceeded:
+            return -200.0
+        if motor_stalled and not steady_state_reached:
+            return -150.0
+            
+        # Success reward calculation
         error_factor = -0.5 * final_error
         time_factor = -0.3 * settling_time
-        overshoot_factor = -0.2 * max_overshoot
+        stability_bonus = 50.0 if steady_state_reached else 0.0
         
-        reward = error_factor + time_factor + overshoot_factor
+        reward = error_factor + time_factor + stability_bonus
         
         self.get_logger().info(
-            f'Episode complete - Final error: {final_error:.2f}, '
-            f'Settling time: {settling_time:.2f}, '
-            f'Max overshoot: {max_overshoot:.2f}, '
+            f'Episode metrics - Error: {final_error:.2f}, Time: {settling_time:.2f}s, '
+            f'Stable: {steady_state_reached}, Stalled: {motor_stalled}, '
             f'Reward: {reward:.2f}'
         )
         

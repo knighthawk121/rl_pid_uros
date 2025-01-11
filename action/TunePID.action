@@ -21,3 +21,6 @@ float64 final_error    # The final error value when tuning completed
 float64 current_error      # Current error between target and actual position
 int64 current_position    # Current motor position in encoder counts
 int64 target_position     # Target position the system is trying to reach
+bool motor_stopped     # Motor has reached target/stalled
+bool error_stable     # Error has stabilized
+float64 velocity      # Current motor velocity
