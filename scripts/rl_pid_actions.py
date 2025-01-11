@@ -7,13 +7,18 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rl_pid_uros.action import TunePID
 import numpy as np
 from rl_pid_uros_py.q_learner import QLearningAgent
+from rl_pid_uros_py.rl_agent import SARSAAgent, DQNAgent
 import random
 import asyncio
+import sys
 
 class MotorPIDTuner(Node):
     def __init__(self):
         super().__init__('rl_pid_tuner')
         
+        # Get agent selection from user
+        self.agent = self.select_agent()
+
         self.callback_group = ReentrantCallbackGroup()
         self.action_client = ActionClient(
             self,
@@ -28,11 +33,10 @@ class MotorPIDTuner(Node):
         self.feedback_history = []
         self.goal_timeout = 30.0  # 30 second timeout
         
-        # Initialize with some reasonable PID values
-        self.agent = QLearningAgent()
         self.initial_kp = 0.5  # Start with non-zero values
         self.initial_ki = 0.0
         self.initial_kd = 0.01
+
         self.get_logger().info(f'Q-learning agent initialized with {self.agent.episode_count} previous episodes')
         if self.agent.best_pid_values is not None:
             self.get_logger().info(f'Best known PID values - Kp: {self.agent.best_pid_values[0]:.4f}, '
@@ -46,6 +50,27 @@ class MotorPIDTuner(Node):
         self.timer = self.create_timer(10.0, self.send_new_goal_wrapper)
         self.get_logger().info('Timer started for sending goals every 10 seconds')
 
+    def select_agent(self):
+        while True:
+            print("\nSelect RL agent type:")
+            print("1. Q-Learning")
+            print("2. SARSA")
+            print("3. DQN (Deep Q-Network)")
+            
+            try:
+                choice = input("Enter choice (1-3): ").strip()
+                if choice == "1":
+                    return QLearningAgent()
+                elif choice == "2":
+                    return SARSAAgent()
+                elif choice == "3":
+                    return DQNAgent()
+                else:
+                    print("Invalid choice. Please select 1-3.")
+            except Exception as e:
+                print(f"Error selecting agent: {str(e)}")
+                sys.exit(1)
+                
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
         self.latest_feedback = feedback
@@ -74,18 +99,16 @@ class MotorPIDTuner(Node):
             if self.current_goal_handle:
                 await self.current_goal_handle.cancel_goal_async()
             self.goal_active = False
-            await asyncio.sleep(1.0)  # Wait for cancellation to complete
+            await asyncio.sleep(1.0)
             
         try:
-            # Get current state and PID values
             state = self.get_current_state()
-            if len(self.feedback_history) < 2:  # First attempt
+            if len(self.feedback_history) < 2:
                 kp, ki, kd = self.initial_kp, self.initial_ki, self.initial_kd
             else:
                 kp, ki, kd = self.agent.get_pid_values(state)
             
-            # Generate new target position (smaller range initially)
-            target_position = random.randint(0, 180)  # Reduced range for testing
+            target_position = random.randint(0, 180)
             
             goal_msg = TunePID.Goal()
             goal_msg.kp = float(kp)
@@ -99,8 +122,6 @@ class MotorPIDTuner(Node):
             )
             
             self.feedback_history = []
-            
-            # Send goal
             send_goal_future = await self.action_client.send_goal_async(
                 goal_msg,
                 feedback_callback=self.feedback_callback
@@ -113,7 +134,6 @@ class MotorPIDTuner(Node):
             self.current_goal_handle = send_goal_future
             self.goal_active = True
             
-            # Wait for result with timeout
             try:
                 get_result_future = await send_goal_future.get_result_async()
                 result = get_result_future.result
@@ -122,11 +142,17 @@ class MotorPIDTuner(Node):
                     self.get_logger().info(f'Goal succeeded with final error: {result.final_error}')
                     reward = self.calculate_episode_reward()
                     next_state = self.get_current_state()
-                    self.agent.update(state, (kp, ki, kd), reward, next_state)
-                else:
-                    self.get_logger().warn('Goal finished without result')
-                
                     
+                    if isinstance(self.agent, SARSAAgent):
+                        next_pid_values = self.agent.get_pid_values(next_state)
+                        self.agent.update(state, (kp, ki, kd), reward, next_state, next_pid_values)
+                    elif isinstance(self.agent, DQNAgent):
+                        action = self.agent.get_action_index((kp, ki, kd))
+                        self.agent.remember(state, action, reward, next_state, True)
+                        self.agent.replay()
+                    else:  # QLearningAgent
+                        self.agent.update(state, (kp, ki, kd), reward, next_state)
+                        
             except asyncio.TimeoutError:
                 self.get_logger().error('Goal timed out!')
                 if self.current_goal_handle:
@@ -136,7 +162,7 @@ class MotorPIDTuner(Node):
             self.get_logger().error(f'Error in send_new_goal: {str(e)}')
         finally:
             self.goal_active = False
-            
+
     def calculate_episode_reward(self):
         if not self.feedback_history:
             return -100.0
