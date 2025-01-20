@@ -12,10 +12,36 @@ import random
 import asyncio
 import sys
 import torch
+from collections import deque
 
-class MotorPIDTuner(Node):
+class ImprovedMotorPIDTuner(Node):
     def __init__(self):
         super().__init__('rl_pid_tuner')
+        
+        # System constraints
+        self.POSITION_MIN = 0
+        self.POSITION_MAX = 360
+        self.MAX_VELOCITY = 50  # max allowable velocity
+        self.SAFE_ACCELERATION = 20  # max safe acceleration
+        
+        # PID constraints
+        self.KP_RANGE = (0.1, 2.0)
+        self.KI_RANGE = (0.0, 0.5)
+        self.KD_RANGE = (0.0, 0.2)
+        
+        # Performance parameters
+        self.MAX_OVERSHOOT = 0.15  # 15% maximum overshoot
+        self.SETTLING_THRESHOLD = 0.02  # 2% settling threshold
+        self.MIN_SETTLING_TIME = 0.5  # minimum settling time in seconds
+        
+        # Anti-windup parameters
+        self.integral_sum = 0.0
+        self.integral_limit = 100.0  # anti-windup limit
+        
+        # Initialize target transition system
+        self.current_target = 90  # start at midpoint
+        self.target_queue = deque(maxlen=5)
+        self.transition_rate = 0.2  # target change per second
         
         # Get agent selection from user
         self.agent = self.select_agent()
@@ -28,28 +54,70 @@ class MotorPIDTuner(Node):
             callback_group=self.callback_group
         )
         
+        # Enhanced state tracking
         self.current_goal_handle = None
         self.goal_active = False
         self.latest_feedback = None
         self.feedback_history = []
-        self.goal_timeout = 30.0  # 30 second timeout
+        self.goal_timeout = 30.0
+        self.performance_history = []
         
-        self.initial_kp = 0.5  # Start with non-zero values
+        # Conservative initial PID values
+        self.initial_kp = 0.3
         self.initial_ki = 0.0
-        self.initial_kd = 0.01
+        self.initial_kd = 0.05
 
-        self.get_logger().info(f'Q-learning agent initialized with {self.agent.episode_count} previous episodes')
-        if self.agent.best_pid_values is not None:
-            self.get_logger().info(f'Best known PID values - Kp: {self.agent.best_pid_values[0]:.4f}, '
-                                f'Ki: {self.agent.best_pid_values[1]:.4f}, '
-                                f'Kd: {self.agent.best_pid_values[2]:.4f}')
+        # Exploration parameters
+        self.exploration_phase = True
+        self.exploration_episodes = 20
+        self.episode_count = 0
+        
+        self._setup_logging()
+        self._initialize_action_client()
+        self._start_timer()
+
+    def _setup_logging(self):
+        """Enhanced logging setup"""
+        self.get_logger().info(f'Improved PID tuner initialized with {self.agent.episode_count} previous episodes')
+        if hasattr(self.agent, 'best_pid_values') and self.agent.best_pid_values is not None:
+            self.get_logger().info(
+                f'Best known PID values - Kp: {self.agent.best_pid_values[0]:.4f}, '
+                f'Ki: {self.agent.best_pid_values[1]:.4f}, '
+                f'Kd: {self.agent.best_pid_values[2]:.4f}'
+            )
+
+    def _initialize_action_client(self):
+        """Initialize and verify action client"""
         self.get_logger().info('Waiting for action server...')
         self.action_client.wait_for_server()
         self.get_logger().info('Action server is available!')
 
-        # Create timer for sending new goals with longer interval
+    def _start_timer(self):
+        """Initialize timer with gradual target transitions"""
         self.timer = self.create_timer(10.0, self.send_new_goal_wrapper)
         self.get_logger().info('Timer started for sending goals every 10 seconds')
+
+    def generate_next_target(self):
+        """Generate smooth target transitions"""
+        if not self.target_queue:
+            new_target = random.randint(self.POSITION_MIN, self.POSITION_MAX)
+            steps = np.linspace(self.current_target, new_target, 5)
+            self.target_queue.extend(steps)
+        return int(self.target_queue.popleft())
+
+    def apply_anti_windup(self, error, dt):
+        """Implement anti-windup mechanism"""
+        self.integral_sum += error * dt
+        self.integral_sum = np.clip(self.integral_sum, -self.integral_limit, self.integral_limit)
+        return self.integral_sum
+
+    def calculate_safe_pid_values(self, kp, ki, kd):
+        """Ensure PID values are within safe bounds"""
+        safe_kp = np.clip(kp, self.KP_RANGE[0], self.KP_RANGE[1])
+        safe_ki = np.clip(ki, self.KI_RANGE[0], self.KI_RANGE[1])
+        safe_kd = np.clip(kd, self.KD_RANGE[0], self.KD_RANGE[1])
+        return safe_kp, safe_ki, safe_kd
+    
 
     def select_agent(self):
         while True:
@@ -71,7 +139,7 @@ class MotorPIDTuner(Node):
             except Exception as e:
                 print(f"Error selecting agent: {str(e)}")
                 sys.exit(1)
-                
+    
     def feedback_callback(self, feedback_msg):
         feedback = feedback_msg.feedback
         self.latest_feedback = feedback
@@ -95,6 +163,7 @@ class MotorPIDTuner(Node):
             await self.send_new_goal()
 
     async def send_new_goal(self):
+        """Enhanced goal sending with safety checks"""
         if self.goal_active:
             self.get_logger().warn('Previous goal still active, canceling...')
             if self.current_goal_handle:
@@ -104,25 +173,40 @@ class MotorPIDTuner(Node):
             
         try:
             state = self.get_current_state()
-            if len(self.feedback_history) < 2:
-                kp, ki, kd = self.initial_kp, self.initial_ki, self.initial_kd
-            else:
-                kp, ki, kd = self.agent.get_pid_values(state)
             
-            target_position = random.randint(0, 180)
+            # Determine PID values based on exploration phase
+            if self.exploration_phase and self.episode_count < self.exploration_episodes:
+                kp = random.uniform(self.KP_RANGE[0], self.KP_RANGE[1])
+                ki = random.uniform(self.KI_RANGE[0], self.KI_RANGE[1])
+                kd = random.uniform(self.KD_RANGE[0], self.KD_RANGE[1])
+                self.episode_count += 1
+            else:
+                if len(self.feedback_history) < 2:
+                    kp, ki, kd = self.initial_kp, self.initial_ki, self.initial_kd
+                else:
+                    kp, ki, kd = self.agent.get_pid_values(state)
+                    kp, ki, kd = self.calculate_safe_pid_values(kp, ki, kd)
+            
+            # Generate smooth target transition
+            target_position = self.generate_next_target()
+            self.current_target = target_position
             
             goal_msg = TunePID.Goal()
             goal_msg.kp = float(kp)
             goal_msg.ki = float(ki)
             goal_msg.kd = float(kd)
-            goal_msg.target_position = target_position
+            goal_msg.target_position = int(target_position)
             
             self.get_logger().info(
                 f'Sending new goal - kp: {kp:.4f}, ki: {ki:.4f}, kd: {kd:.4f}, '
                 f'target: {target_position}'
             )
             
+            # Reset tracking variables
             self.feedback_history = []
+            self.integral_sum = 0.0
+            
+            # Send goal and handle response
             send_goal_future = await self.action_client.send_goal_async(
                 goal_msg,
                 feedback_callback=self.feedback_callback
@@ -135,6 +219,7 @@ class MotorPIDTuner(Node):
             self.current_goal_handle = send_goal_future
             self.goal_active = True
             
+            # Handle goal result
             try:
                 get_result_future = await send_goal_future.get_result_async()
                 result = get_result_future.result
@@ -144,28 +229,17 @@ class MotorPIDTuner(Node):
                     reward = self.calculate_episode_reward()
                     next_state = self.get_current_state()
                     
-                    # Modified section of send_new_goal method
-                    if isinstance(self.agent, SARSAAgent):
-                        next_pid_values = self.agent.get_pid_values(next_state)
-                        self.agent.update(state, (kp, ki, kd), reward, next_state, next_pid_values)
-                    elif isinstance(self.agent, DQNAgent):
-                        # Convert PID values to state tensor for DQN
-                        current_state = torch.FloatTensor([state])
-                        next_state_tensor = torch.FloatTensor([next_state])
-                        
-                        # Store experience in replay buffer
-                        self.agent.remember(current_state.numpy(), 
-                                         (kp, ki, kd), 
-                                         reward, 
-                                         next_state_tensor.numpy(), 
-                                         True)
-                        self.agent.replay()
-                        
-                        # Update target network periodically
-                        if self.agent.episode_count % 10 == 0:
-                            self.agent.update_target_model()
-                    else:  # QLearningAgent
-                        self.agent.update(state, (kp, ki, kd), reward, next_state)
+                    # Update agent based on type
+                    self.update_agent(state, (kp, ki, kd), reward, next_state)
+                    
+                    # Store performance metrics
+                    self.performance_history.append({
+                        'final_error': result.final_error,
+                        'settling_time': len(self.feedback_history) * 0.1,
+                        'reward': reward,
+                        'pid_values': (kp, ki, kd)
+                    })
+                    
             except asyncio.TimeoutError:
                 self.get_logger().error('Goal timed out!')
                 if self.current_goal_handle:
@@ -177,6 +251,7 @@ class MotorPIDTuner(Node):
             self.goal_active = False
 
     def calculate_episode_reward(self):
+        """Enhanced reward calculation with multiple performance metrics"""
         if not self.feedback_history:
             return -100.0
             
@@ -184,46 +259,85 @@ class MotorPIDTuner(Node):
         final_error = errors[-1]
         settling_time = len(errors) * 0.1
         
-        # New termination checks
-        steady_state_reached = all(abs(e) < 2.0 for e in errors[-5:])  # Last 5 errors within ±2
-        max_time_exceeded = settling_time > 5.0  # 5 seconds max
+        # Calculate performance metrics
+        overshoot = max(0, max(errors) / self.current_target - 1)
+        settling_idx = next((i for i, e in enumerate(errors) if abs(e) <= self.SETTLING_THRESHOLD), len(errors))
+        settling_time = settling_idx * 0.1
         
-        # Calculate velocity from position history
+        # Calculate velocity and acceleration
         positions = [fb['position'] for fb in self.feedback_history]
-        velocities = np.diff(positions) / 0.1  # 10Hz sampling
+        velocities = np.diff(positions) / 0.1
+        accelerations = np.diff(velocities) / 0.1 if len(velocities) > 1 else [0]
+        
+        # Check various performance criteria
+        steady_state_reached = all(abs(e) <= self.SETTLING_THRESHOLD for e in errors[-5:])
+        max_time_exceeded = settling_time > 5.0
+        velocity_violation = any(abs(v) > self.MAX_VELOCITY for v in velocities)
+        acceleration_violation = any(abs(a) > self.SAFE_ACCELERATION for a in accelerations)
+        overshoot_violation = overshoot > self.MAX_OVERSHOOT
         motor_stalled = len(velocities) > 5 and all(abs(v) < 1.0 for v in velocities[-5:])
         
-        # Early termination penalties
-        if max_time_exceeded:
-            return -200.0
-        if motor_stalled and not steady_state_reached:
-            return -150.0
-            
-        # Success reward calculation
-        error_factor = -0.5 * final_error
-        time_factor = -0.3 * settling_time
+        # Calculate reward components
+        error_penalty = -0.5 * final_error
+        time_penalty = -0.3 * settling_time
         stability_bonus = 50.0 if steady_state_reached else 0.0
         
-        reward = error_factor + time_factor + stability_bonus
+        # Apply penalties for violations
+        penalty = 0.0
+        if max_time_exceeded: penalty -= 500.0
+        if velocity_violation: penalty -= 1000.0
+        if acceleration_violation: penalty -= 1000.0
+        if overshoot_violation: penalty -= 500.0
+        if motor_stalled and not steady_state_reached: penalty -= 1000.0
         
+        reward = error_penalty + time_penalty + stability_bonus + penalty
+        
+        # Log detailed metrics
         self.get_logger().info(
             f'Episode metrics - Error: {final_error:.2f}, Time: {settling_time:.2f}s, '
-            f'Stable: {steady_state_reached}, Stalled: {motor_stalled}, '
-            f'Reward: {reward:.2f}'
+            f'Overshoot: {overshoot*100:.1f}%, Stable: {steady_state_reached}, '
+            f'Stalled: {motor_stalled}, Reward: {reward:.2f}'
         )
         
         return reward
 
     def get_current_state(self):
+        """Enhanced state representation"""
         if self.latest_feedback is not None:
-            return self.latest_feedback.current_error
-        return 0.0
+            # Include more state information for better decision making
+            error = self.latest_feedback.current_error
+            position = self.latest_feedback.current_position
+            target = self.latest_feedback.target_position
+            
+            # Calculate additional state features
+            error_change = 0.0
+            if len(self.feedback_history) >= 2:
+                prev_error = self.feedback_history[-2]['error']
+                error_change = error - prev_error
+            
+            return np.array([error, error_change, position, target])
+        return np.zeros(4)
+
+    def update_agent(self, state, action, reward, next_state):
+        """Update agent based on its type"""
+        if isinstance(self.agent, SARSAAgent):
+            next_pid_values = self.agent.get_pid_values(next_state)
+            self.agent.update(state, action, reward, next_state, next_pid_values)
+        elif isinstance(self.agent, DQNAgent):
+            current_state = torch.FloatTensor([state])
+            next_state_tensor = torch.FloatTensor([next_state])
+            self.agent.remember(current_state.numpy(), action, reward, next_state_tensor.numpy(), True)
+            self.agent.replay()
+            if self.agent.episode_count % 10 == 0:
+                self.agent.update_target_model()
+        else:  # QLearningAgent
+            self.agent.update(state, action, reward, next_state)
 
 def main(args=None):
     rclpy.init(args=args)
     
     try:
-        node = MotorPIDTuner()
+        node = ImprovedMotorPIDTuner()
         executor = rclpy.executors.MultiThreadedExecutor()
         executor.add_node(node)
         
