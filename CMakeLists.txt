@@ -21,6 +21,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   # Make sure these files exist exactly as named
   "srv/Tminusp.srv"
   "action/TunePID.action"
+  "action/TunePIDmin.action"
   DEPENDENCIES action_msgs actionlib_msgs std_msgs
 )
 

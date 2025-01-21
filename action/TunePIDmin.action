@@ -1,0 +1,25 @@
+# Action definition for PID tuning minimal for microros
+# File: rl_pid_uros/action/TunePidmin.action
+
+# Goal Definition
+# These are the parameters sent to start the tuning process
+# Each parameter is a floating-point value representing a PID coefficient
+float32 kp    # Proportional gain coefficient
+float32 ki    # Integral gain coefficient
+float32 kd    # Derivative gain coefficient
+int32 target_position #specified target position the motor has to reach 0 - 360 degrees
+---
+# Result Definition
+# This is sent once when the tuning process completes
+# It provides information about the final state of the system
+int32 final_error    # The final error value when tuning completed
+---
+# Feedback Definition
+# This is sent periodically during the tuning process
+# It provides real-time information about the system's state
+int32 current_error      # Current error between target and actual position
+int32 current_position    # Current motor position in encoder counts
+int32 target_position     # Target position the system is trying to reach
+bool motor_stopped     # Motor has reached target/stalled
+bool error_stable     # Error has stabilized
+float32 velocity      # Current motor velocity

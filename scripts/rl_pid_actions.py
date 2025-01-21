@@ -4,7 +4,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rl_pid_uros.action import TunePID
+from rl_pid_uros.action import TunePID, TunePIDmin
 import numpy as np
 from rl_pid_uros_py.q_learner import QLearningAgent
 from rl_pid_uros_py.rl_agent import SARSAAgent, DQNAgent
@@ -47,12 +47,7 @@ class MotorPIDTuner(Node):
         self.agent = self.select_agent()
 
         self.callback_group = ReentrantCallbackGroup()
-        self.action_client = ActionClient(
-            self,
-            TunePID,
-            'tune_pid_action',
-            callback_group=self.callback_group
-        )
+        self.action_client = self.select_platform()
         
         # Enhanced state tracking
         self.current_goal_handle = None
@@ -75,6 +70,26 @@ class MotorPIDTuner(Node):
         self._setup_logging()
         self._initialize_action_client()
         self._start_timer()
+    
+    def select_platform(self):
+        while True: 
+            print('\nSelect platform:')
+            print('1.ROS2-Raspi Server')
+            print('2. MicroROS - ESP32 server')
+
+            try: 
+                choice = input("Enter Choice (1 or 2):").strip()
+                if choice == '1':
+                    self.action_client = ActionClient(self,TunePID,'tune_pid_action',
+                                callback_group=self.callback_group)
+                    return self.action_client
+                if choice == '2':
+                    self.action_client = ActionClient(self,TunePIDmin,'tune_pid_action',
+                                callback_group=self.callback_group)
+                    return self.action_client
+            except Exception as e:
+                print(f"Error selecting platform: {str(e)}")
+                sys.exit(1)
 
     def _setup_logging(self):
         """Enhanced logging setup"""
@@ -191,12 +206,19 @@ class MotorPIDTuner(Node):
             target_position = self.generate_next_target()
             self.current_target = target_position
             
-            goal_msg = TunePID.Goal()
-            goal_msg.kp = float(kp)
-            goal_msg.ki = float(ki)
-            goal_msg.kd = float(kd)
-            goal_msg.target_position = int(target_position)
-            
+            if self.select_platform == '1':
+                goal_msg = TunePID.Goal()
+                goal_msg.kp = float(kp)
+                goal_msg.ki = float(ki)
+                goal_msg.kd = float(kd)
+                goal_msg.target_position = int(target_position)
+            else: 
+                goal_msg = TunePIDmin.Goal()
+                goal_msg.kp = float(kp)
+                goal_msg.ki = float(ki)
+                goal_msg.kd = float(kd)
+                goal_msg.target_position = int(target_position)
+
             self.get_logger().info(
                 f'Sending new goal - kp: {kp:.4f}, ki: {ki:.4f}, kd: {kd:.4f}, '
                 f'target: {target_position}'
