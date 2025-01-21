@@ -14,7 +14,7 @@ import sys
 import torch
 from collections import deque
 
-class ImprovedMotorPIDTuner(Node):
+class MotorPIDTuner(Node):
     def __init__(self):
         super().__init__('rl_pid_tuner')
         
@@ -78,7 +78,7 @@ class ImprovedMotorPIDTuner(Node):
 
     def _setup_logging(self):
         """Enhanced logging setup"""
-        self.get_logger().info(f'Improved PID tuner initialized with {self.agent.episode_count} previous episodes')
+        self.get_logger().info(f'PID tuner initialized with {self.agent.episode_count} previous episodes')
         if hasattr(self.agent, 'best_pid_values') and self.agent.best_pid_values is not None:
             self.get_logger().info(
                 f'Best known PID values - Kp: {self.agent.best_pid_values[0]:.4f}, '
@@ -337,7 +337,7 @@ def main(args=None):
     rclpy.init(args=args)
     
     try:
-        node = ImprovedMotorPIDTuner()
+        node = MotorPIDTuner()
         executor = rclpy.executors.MultiThreadedExecutor()
         executor.add_node(node)
         
