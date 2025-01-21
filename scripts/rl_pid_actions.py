@@ -342,11 +342,14 @@ def main(args=None):
         executor.add_node(node)
         
         try:
-            executor.spin()
+            executor.spin()   
         finally:
             executor.shutdown()
             node.destroy_node()
-            
+
+    except KeyboardInterrupt:
+            print("Received keyboard interrupt, shutting down...")
+    
     finally:
         rclpy.shutdown()
 
