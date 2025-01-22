@@ -113,11 +113,10 @@ class QLearningAgent:
             json.dump(self.training_history, f, indent=2)
             
         print(f"Saved Q-table to {file_path}")
-        
+    
     def get_best_pid_values(self):
-        """Get the PID values that have the highest Q-values"""
-        best_values = np.unravel_index(np.argmax(np.max(self.q_table, axis=0)), 
-                                     (10, 10, 10))
+        best_state = np.argmax(np.max(self.q_table, axis=(1,2,3)))
+        best_values = np.unravel_index(np.argmax(self.q_table[best_state]), (10, 10, 10))
         return (
             self.kp_range[best_values[0]],
             self.ki_range[best_values[1]],

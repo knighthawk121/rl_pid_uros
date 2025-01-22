@@ -78,12 +78,12 @@ class MotorPIDTuner(Node):
             print('2. MicroROS - ESP32 server')
 
             try: 
-                choice = input("Enter Choice (1 or 2):").strip()
-                if choice == '1':
+                self.platform_choice = input("Enter Choice (1 or 2):").strip()
+                if self.platform_choice == '1':
                     self.action_client = ActionClient(self,TunePID,'tune_pid_action',
                                 callback_group=self.callback_group)
                     return self.action_client
-                if choice == '2':
+                if self.platform_choice == '2':
                     self.action_client = ActionClient(self,TunePIDmin,'tune_pid_action',
                                 callback_group=self.callback_group)
                     return self.action_client
@@ -92,7 +92,7 @@ class MotorPIDTuner(Node):
                 sys.exit(1)
 
     def _setup_logging(self):
-        """Enhanced logging setup"""
+        """logging setup"""
         self.get_logger().info(f'PID tuner initialized with {self.agent.episode_count} previous episodes')
         if hasattr(self.agent, 'best_pid_values') and self.agent.best_pid_values is not None:
             self.get_logger().info(
@@ -178,7 +178,7 @@ class MotorPIDTuner(Node):
             await self.send_new_goal()
 
     async def send_new_goal(self):
-        """Enhanced goal sending with safety checks"""
+        """goal sending with safety checks"""
         if self.goal_active:
             self.get_logger().warn('Previous goal still active, canceling...')
             if self.current_goal_handle:
@@ -206,20 +206,22 @@ class MotorPIDTuner(Node):
             target_position = self.generate_next_target()
             self.current_target = target_position
             
-            if self.select_platform == '1':
+            if self.platform_choice == '1':
+                self.platform = 'raspi'
                 goal_msg = TunePID.Goal()
                 goal_msg.kp = float(kp)
                 goal_msg.ki = float(ki)
                 goal_msg.kd = float(kd)
                 goal_msg.target_position = int(target_position)
             else: 
+                self.platform = 'esp32'
                 goal_msg = TunePIDmin.Goal()
                 goal_msg.kp = float(kp)
                 goal_msg.ki = float(ki)
                 goal_msg.kd = float(kd)
                 goal_msg.target_position = int(target_position)
 
-            self.get_logger().info(
+            self.get_logger().info(f'sending goals to {self.platform},'
                 f'Sending new goal - kp: {kp:.4f}, ki: {ki:.4f}, kd: {kd:.4f}, '
                 f'target: {target_position}'
             )
@@ -273,7 +275,7 @@ class MotorPIDTuner(Node):
             self.goal_active = False
 
     def calculate_episode_reward(self):
-        """Enhanced reward calculation with multiple performance metrics"""
+        """reward calculation with multiple performance metrics"""
         if not self.feedback_history:
             return -100.0
             
@@ -324,21 +326,21 @@ class MotorPIDTuner(Node):
         return reward
 
     def get_current_state(self):
-        """Enhanced state representation"""
         if self.latest_feedback is not None:
-            # Include more state information for better decision making
-            error = self.latest_feedback.current_error
-            position = self.latest_feedback.current_position
-            target = self.latest_feedback.target_position
-            
-            # Calculate additional state features
-            error_change = 0.0
-            if len(self.feedback_history) >= 2:
-                prev_error = self.feedback_history[-2]['error']
-                error_change = error - prev_error
-            
-            return np.array([error, error_change, position, target])
-        return np.zeros(4)
+            # For DQN, return full state
+            if isinstance(self.agent, DQNAgent):
+                error = self.latest_feedback.current_error
+                position = self.latest_feedback.current_position
+                target = self.latest_feedback.target_position
+                error_change = 0.0
+                if len(self.feedback_history) >= 2:
+                    prev_error = self.feedback_history[-2]['error']
+                    error_change = error - prev_error
+                return np.array([error, error_change, position, target])
+            # For Q-learning/SARSA, return only error
+            else:
+                return self.latest_feedback.current_error
+        return 0.0 if not isinstance(self.agent, DQNAgent) else np.zeros(4)
 
     def update_agent(self, state, action, reward, next_state):
         """Update agent based on its type"""
@@ -346,8 +348,8 @@ class MotorPIDTuner(Node):
             next_pid_values = self.agent.get_pid_values(next_state)
             self.agent.update(state, action, reward, next_state, next_pid_values)
         elif isinstance(self.agent, DQNAgent):
-            current_state = torch.FloatTensor([state])
-            next_state_tensor = torch.FloatTensor([next_state])
+            current_state = torch.FloatTensor(np.array([state]))
+            next_state_tensor = torch.FloatTensor(np.array([next_state]))
             self.agent.remember(current_state.numpy(), action, reward, next_state_tensor.numpy(), True)
             self.agent.replay()
             if self.agent.episode_count % 10 == 0:
