@@ -10,6 +10,8 @@ This repository contains a **Reinforcement learning-based PID controller** for a
 - [Installation](#installation)
 - [Usage](#usage)
 - [Configuration](#configuration)
+- [Other Use cases](#other-potential-use-cases)
+- [Contributions](#contributing)
 - [License](#license)
 
 ## Introduction
@@ -111,10 +113,10 @@ you can always use the ready to deploy Docker image for micro-ros-agent
    #for service client
    ros2 run rl_pid_uros pid_tuner_service
 
-   #for launching action client and Micro-ros-agent
+   #for launching action client and Micro-ros-agent (if installed locally)
    ros2 launch rl_pid_uros rl_action
 
-   #for launching service client and Micro-ros-agent
+   #for launching service client and Micro-ros-agent (if installed locally)
    ros2 launch rl_pid_uros rl_service
 
    #select the agent from the options and the server node for running the server.
@@ -147,6 +149,14 @@ use the [rl_pid_actions_wifi_udp.ino](/uros/arduino_ide_esp32/rl_pid_actions_wif
    1.**PID Parameters:** Initial PID values are set in [main scripts files](/scripts). Adjust kp, ki, and kd as needed.
     
    2.**Q-learning Parameters:** Modify alpha, gamma, and epsilon to tune the learning behavior.
+
+
+## Other Potential use cases
+This method can be easily implemented on a more complex systems that use PID Controller as a primary control system, such as quadrotor UAVs. 
+
+## Contributing
+
+Contributions to this repository are welcome. Please feel free to submit pull requests for bug fixes, new features, or improvements to the documentation. This repo is under developement, and needs some work and fine tuning. 
 
 
 ## License
